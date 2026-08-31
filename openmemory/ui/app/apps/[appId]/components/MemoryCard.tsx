@@ -11,6 +11,8 @@ interface MemoryCardProps {
   metadata?: Record<string, unknown>;
   categories?: string[];
   access_count?: number;
+  accessed_by_client?: string | null;
+  attribution_prefix?: string;
   app_name: string;
   created_by_hostname?: string | null;
   created_by_client?: string | null;
@@ -26,6 +28,8 @@ export function MemoryCard({
   metadata,
   categories,
   access_count,
+  accessed_by_client,
+  attribution_prefix = "Criada por:",
   app_name,
   created_by_hostname,
   created_by_client,
@@ -90,12 +94,13 @@ export function MemoryCard({
               <ArrowRight className="ml-2 h-4 w-4" />
             </Link>
             <AttributionBadge
-              appName={app_name}
-              clientName={created_by_client}
-              hostname={created_by_hostname}
-              displayName={created_by_display_name}
-              avatarUrl={created_by_avatar_url}
-              metadata={metadata}
+              appName={attribution_prefix === "Acessada por:" ? "openmemory" : app_name}
+              clientName={attribution_prefix === "Acessada por:" ? accessed_by_client : created_by_client}
+              hostname={attribution_prefix === "Acessada por:" ? null : created_by_hostname}
+              displayName={attribution_prefix === "Acessada por:" ? null : created_by_display_name}
+              avatarUrl={attribution_prefix === "Acessada por:" ? null : created_by_avatar_url}
+              metadata={attribution_prefix === "Acessada por:" ? null : metadata}
+              prefix={attribution_prefix}
             />
           </div>
         </div>

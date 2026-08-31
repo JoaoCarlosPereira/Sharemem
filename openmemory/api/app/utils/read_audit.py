@@ -284,6 +284,15 @@ def list_project_accessed_memories(
     memories: list[dict] = []
     for memory_id, access_count, last_accessed in rows:
         shared = get_shared_memory_by_id(str(memory_id)) or {}
+        latest_access = (
+            db.query(ReadAuditLog)
+            .filter(ReadAuditLog.memory_id == str(memory_id))
+            .order_by(ReadAuditLog.accessed_at.desc())
+            .first()
+        )
+        latest_client = latest_access.client_name if latest_access else None
+        if latest_access and latest_access.source == "api" and latest_client == "openmemory":
+            latest_client = "Interface"
         memories.append(
             {
                 "memory": {
@@ -300,6 +309,7 @@ def list_project_accessed_memories(
                 },
                 "access_count": int(access_count or 0),
                 "last_accessed": as_utc(last_accessed),
+                "accessed_by_client": latest_client,
             }
         )
     return total, memories

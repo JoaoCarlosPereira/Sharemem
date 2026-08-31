@@ -21,6 +21,11 @@ export const constants = {
     icon: <Icon source="/logo.svg" />,
     iconImage: "/logo.svg",
   },
+  interface: {
+    name: "Interface",
+    icon: <Icon source="/logo.svg" />,
+    iconImage: "/logo.svg",
+  },
   sharemem: {
     name: "ShareMem",
     icon: <Icon source="/logo.svg" />,
