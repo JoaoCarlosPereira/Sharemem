@@ -106,6 +106,8 @@ x-api-common: &api-common
     PLANKA_INTERNAL_URL: ${PLANKA_INTERNAL_URL:-http://planka:1337}
     PLANKA_PUBLIC_URL: ${PLANKA_PUBLIC_URL:-/planka}
     PLANKA_MIRROR_SYNC: ${PLANKA_MIRROR_SYNC:-1}
+    # Cards em andamento só voltam ao backlog após 3 dias sem atividade.
+    SPEC_TASK_TIMEOUT_HOURS: ${SPEC_TASK_TIMEOUT_HOURS:-72}
     # JWT do embed dura mais que a sessão UI (8 dias por padrão).
     PLANKA_EMBED_TOKEN_TTL_SECONDS: ${PLANKA_EMBED_TOKEN_TTL_SECONDS:-691200}
     PLANKA_INTERNAL_ACCESS_TOKEN: ${PLANKA_INTERNAL_ACCESS_TOKEN:-${INTERNAL_ACCESS_TOKEN:-}}
