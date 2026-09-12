@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
+	"strings"
 
 	cliCommon "github.com/agentregistry-dev/agentregistry/internal/cli/common"
 	"github.com/agentregistry-dev/agentregistry/internal/cli/scheme"
@@ -179,6 +181,23 @@ func skillRow(skill *v1alpha1.Skill) []string {
 		printer.TruncateString(skill.Metadata.Name, 40),
 		skill.Metadata.Tag,
 		printer.TruncateString(printer.EmptyValueOrDefault(skill.Spec.Description, "<none>"), 60),
+	}
+}
+
+func hookRow(hook *v1alpha1.Hook) []string {
+	if hook == nil {
+		return []string{"<invalid>"}
+	}
+	events := make([]string, 0, len(hook.Spec.Events))
+	for event := range hook.Spec.Events {
+		events = append(events, event)
+	}
+	sort.Strings(events)
+	return []string{
+		printer.TruncateString(hook.Metadata.Name, 40),
+		hook.Metadata.Tag,
+		printer.TruncateString(printer.EmptyValueOrDefault(strings.Join(events, ","), "<none>"), 40),
+		printer.TruncateString(printer.EmptyValueOrDefault(hook.Spec.Description, "<none>"), 60),
 	}
 }
 

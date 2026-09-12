@@ -23,6 +23,7 @@ MAX_SEARCH_LIMIT = 100
 
 KIND_TO_REGISTRY_COLLECTION: dict[str, str] = {
     "agent": "agents",
+    "hook": "hooks",
     "mcpserver": "mcpservers",
     "plugin": "plugins",
     "prompt": "prompts",
@@ -31,10 +32,18 @@ KIND_TO_REGISTRY_COLLECTION: dict[str, str] = {
 
 REGISTRY_KIND_TO_CATALOG_KIND: dict[str, str] = {
     "Agent": "agent",
+    "Hook": "hook",
     "MCPServer": "mcpserver",
     "Plugin": "plugin",
     "Prompt": "prompt",
     "Skill": "skill",
+}
+
+# Kinds published as a complete directory: the metadata row carries the
+# declarative body and an immutable tar.gz artifact carries the files.
+PACKAGE_MEDIA_TYPES: dict[str, str] = {
+    "skill": "application/vnd.agentregistry.skill.v1.tar+gzip",
+    "hook": "application/vnd.agentregistry.hook.v1.tar+gzip",
 }
 
 
@@ -139,6 +148,35 @@ class AgentRegistryHttpClient:
             auth_headers=auth_headers,
         )
 
+    async def put_package_artifact(
+        self,
+        *,
+        kind: str,
+        name: str,
+        tag: str,
+        archive: bytes,
+        namespace: str = "default",
+        auth_headers: Optional[dict[str, str]] = None,
+    ) -> dict[str, Any]:
+        """Upload the immutable package of a packaged kind (skill, hook)."""
+        safe_kind = validate_package_kind(kind)
+        safe_name = validate_path_segment(name, "name")
+        safe_tag = validate_path_segment(tag, "tag")
+        collection = KIND_TO_REGISTRY_COLLECTION[safe_kind]
+        digest = hashlib.sha256(archive).digest()
+        response = await self._request_raw(
+            "PUT",
+            f"/v0/{collection}/{quote(safe_name, safe='')}/{quote(safe_tag, safe='')}/artifact",
+            params={"namespace": namespace or "default"},
+            content=archive,
+            headers={
+                "Content-Type": PACKAGE_MEDIA_TYPES[safe_kind],
+                "Digest": "sha-256=" + base64.b64encode(digest).decode("ascii"),
+            },
+            auth_headers=auth_headers,
+        )
+        return response
+
     async def put_skill_artifact(
         self,
         *,
@@ -148,21 +186,35 @@ class AgentRegistryHttpClient:
         namespace: str = "default",
         auth_headers: Optional[dict[str, str]] = None,
     ) -> dict[str, Any]:
-        safe_name = validate_path_segment(name, "name")
-        safe_tag = validate_path_segment(tag, "tag")
-        digest = hashlib.sha256(archive).digest()
-        response = await self._request_raw(
-            "PUT",
-            f"/v0/skills/{quote(safe_name, safe='')}/{quote(safe_tag, safe='')}/artifact",
-            params={"namespace": namespace or "default"},
-            content=archive,
-            headers={
-                "Content-Type": "application/vnd.agentregistry.skill.v1.tar+gzip",
-                "Digest": "sha-256=" + base64.b64encode(digest).decode("ascii"),
-            },
+        return await self.put_package_artifact(
+            kind="skill",
+            name=name,
+            tag=tag,
+            archive=archive,
+            namespace=namespace,
             auth_headers=auth_headers,
         )
-        return response
+
+    async def get_package_download(
+        self,
+        *,
+        kind: str,
+        name: str,
+        tag: str,
+        namespace: str = "default",
+        auth_headers: Optional[dict[str, str]] = None,
+    ) -> tuple[bytes, dict[str, str]]:
+        """Download a packaged kind's directory re-zipped by the registry."""
+        safe_kind = validate_package_kind(kind)
+        safe_name = validate_path_segment(name, "name")
+        safe_tag = validate_path_segment(tag, "tag")
+        collection = KIND_TO_REGISTRY_COLLECTION[safe_kind]
+        return await self._request_bytes(
+            "GET",
+            f"/v0/{collection}/{quote(safe_name, safe='')}/{quote(safe_tag, safe='')}/download",
+            params={"namespace": namespace or "default"},
+            auth_headers=auth_headers,
+        )
 
     async def get_skill_download(
         self,
@@ -172,13 +224,8 @@ class AgentRegistryHttpClient:
         namespace: str = "default",
         auth_headers: Optional[dict[str, str]] = None,
     ) -> tuple[bytes, dict[str, str]]:
-        safe_name = validate_path_segment(name, "name")
-        safe_tag = validate_path_segment(tag, "tag")
-        return await self._request_bytes(
-            "GET",
-            f"/v0/skills/{quote(safe_name, safe='')}/{quote(safe_tag, safe='')}/download",
-            params={"namespace": namespace or "default"},
-            auth_headers=auth_headers,
+        return await self.get_package_download(
+            kind="skill", name=name, tag=tag, namespace=namespace, auth_headers=auth_headers
         )
 
     async def get_skill_artifact(
@@ -196,11 +243,27 @@ class AgentRegistryHttpClient:
         the digest published in ``status.resolvedSource.artifact``. Install
         recipes verify against that digest, so the bytes must not be rebuilt.
         """
+        return await self.get_package_artifact(
+            kind="skill", name=name, tag=tag, namespace=namespace, auth_headers=auth_headers
+        )
+
+    async def get_package_artifact(
+        self,
+        *,
+        kind: str,
+        name: str,
+        tag: str,
+        namespace: str = "default",
+        auth_headers: Optional[dict[str, str]] = None,
+    ) -> tuple[bytes, dict[str, str]]:
+        """Fetch a packaged kind's artifact byte-for-byte (digest-stable)."""
+        safe_kind = validate_package_kind(kind)
         safe_name = validate_path_segment(name, "name")
         safe_tag = validate_path_segment(tag, "tag")
+        collection = KIND_TO_REGISTRY_COLLECTION[safe_kind]
         return await self._request_bytes(
             "GET",
-            f"/v0/skills/{quote(safe_name, safe='')}/{quote(safe_tag, safe='')}/artifact",
+            f"/v0/{collection}/{quote(safe_name, safe='')}/{quote(safe_tag, safe='')}/artifact",
             params={"namespace": namespace or "default"},
             auth_headers=auth_headers,
         )
@@ -323,6 +386,14 @@ def validate_catalog_kind(kind: str) -> str:
     candidate = (kind or "").strip().lower()
     if candidate not in KIND_TO_REGISTRY_COLLECTION:
         raise AgentRegistryValidationError("kind inválido")
+    return candidate
+
+
+def validate_package_kind(kind: str) -> str:
+    """Validate a kind that ships a complete directory (skill, hook)."""
+    candidate = (kind or "").strip().lower()
+    if candidate not in PACKAGE_MEDIA_TYPES:
+        raise AgentRegistryValidationError("kind não possui pacote de arquivos")
     return candidate
 
 

@@ -141,6 +141,45 @@ func App(ctx context.Context, opts ...types.AppOptions) error {
 			})
 		})
 	}
+	// Hook packages reuse the Skill package pipeline end to end: same
+	// content-addressed artifacts table, same transport store, same
+	// upload-then-pin flow. Only the association table and the status type
+	// differ. Hooks have no controller of their own — a Hook has no source to
+	// resolve, so the upload path is the only thing that pins its status.
+	var hookArtifacts types.SkillArtifactStore
+	if pool != nil {
+		sch := pkgdb.OSSSchemaRegistry().MustGet(pkgdb.OSSSourceName)
+		hookArtifactStore := internaldb.NewPostgresHookArtifactStore(pool, sch)
+		hookArtifacts = internaldb.NewSkillArtifactTransportStore(hookArtifactStore, func(ctx context.Context, ref artifact.SkillRef) error {
+			store := stores[v1alpha1.KindHook]
+			if store == nil {
+				return nil
+			}
+			if _, err := store.Get(ctx, ref.Namespace, ref.Name, ref.Tag); err != nil {
+				return err
+			}
+			stored, err := hookArtifactStore.Get(ctx, ref)
+			if err != nil {
+				return err
+			}
+			return store.ApplyPatch(ctx, ref.Namespace, ref.Name, ref.Tag, v1alpha1store.PatchOpts{
+				Status: func(current json.RawMessage) (json.RawMessage, error) {
+					hook := &v1alpha1.Hook{}
+					if err := hook.UnmarshalStatus(current); err != nil {
+						return nil, err
+					}
+					hook.Status.ResolvedSource = &v1alpha1.HookResolvedSource{Artifact: &v1alpha1.HookResolvedArtifact{
+						Digest: stored.Digest, MediaType: stored.MediaType, Size: stored.Size,
+					}}
+					hook.Status.SetCondition(v1alpha1.Condition{Type: "Ready", Status: v1alpha1.ConditionTrue, Reason: "ArtifactReady", Message: "hook package validated"})
+					if hook.Metadata.Generation > hook.Status.ObservedGeneration {
+						hook.Status.ObservedGeneration = hook.Metadata.Generation
+					}
+					return hook.MarshalStatus()
+				},
+			})
+		})
+	}
 	controllerConfig := deploymentControllerConfig(cfg)
 	controllerConfig.DependencyKinds = maps.Clone(options.DeploymentDependencyKinds)
 	if _, err := controller.StartDeploymentController(ctx, pool, stores, deploymentAdapters, controllerConfig); err != nil {
@@ -197,6 +236,7 @@ func App(ctx context.Context, opts ...types.AppOptions) error {
 	perKindHooks := crudPerKindHooks(options)
 	routeOpts := buildRouteOptions(options, stores, deploymentAdapters, perKindHooks)
 	routeOpts.SkillArtifactStore = skillArtifacts
+	routeOpts.HookArtifactStore = hookArtifacts
 
 	// Initialize HTTP server
 	baseServer, err := api.NewServer(cfg, metrics, versionInfo, options.UIHandler, authnProvider, routeOpts, options.OpenAPISchemaNamer)

@@ -4,6 +4,7 @@ import { apiClient } from "@/lib/api-client";
 
 export const REGISTRY_RESOURCE_KINDS = [
   "skills",
+  "hooks",
   "mcpservers",
   "prompts",
   "agents",
@@ -14,6 +15,7 @@ export type RegistryResourceKind = (typeof REGISTRY_RESOURCE_KINDS)[number];
 
 export const REGISTRY_KIND_LABELS: Record<RegistryResourceKind, string> = {
   skills: "Skills",
+  hooks: "Hooks",
   mcpservers: "MCP servers",
   prompts: "Prompts",
   agents: "Agents",
@@ -22,6 +24,7 @@ export const REGISTRY_KIND_LABELS: Record<RegistryResourceKind, string> = {
 
 export const REGISTRY_KIND_API_KIND: Record<RegistryResourceKind, string> = {
   skills: "Skill",
+  hooks: "Hook",
   mcpservers: "MCPServer",
   prompts: "Prompt",
   agents: "Agent",
@@ -64,6 +67,21 @@ export interface RegistryApplyResponse {
   results?: RegistryApplyResult[];
 }
 
+/** One matcher group of a hook event, as published to the catalog. */
+export interface HookMatcherGroup {
+  matcher?: string;
+  hooks: Array<Record<string, unknown>>;
+}
+
+/** Kinds whose publication is a complete directory plus metadata. */
+export const PACKAGED_KINDS: RegistryResourceKind[] = ["skills", "hooks"];
+
+/** The root file each packaged kind requires. */
+export const PACKAGE_ROOT_FILE: Partial<Record<RegistryResourceKind, string>> = {
+  skills: "SKILL.md",
+  hooks: "HOOK.md",
+};
+
 export interface PublishDraft {
   kind: RegistryResourceKind;
   name: string;
@@ -74,6 +92,10 @@ export interface PublishDraft {
   promptContent: string;
   /** Inline SKILL.md body (mem0 catalog) — preferred over git for LAN store. */
   skillContent: string;
+  /** Inline HOOK.md body, the Hook counterpart of skillContent. */
+  hookContent: string;
+  /** Event map as JSON text, edited as-is and parsed on submit. */
+  hookEvents: string;
 }
 
 export function buildRegistryResourcePath(
@@ -193,6 +215,7 @@ export interface InstallRecipe {
 
 const REGISTRY_KIND_TO_RECIPE_KIND: Record<RegistryResourceKind, string> = {
   skills: "skill",
+  hooks: "hook",
   mcpservers: "mcpserver",
   prompts: "prompt",
   agents: "agent",
@@ -261,6 +284,84 @@ export async function publishSkillPackage(input: {
     { ...input, language: input.language || "pt-BR" },
   );
   return response.data;
+}
+
+export async function downloadHookPackage(input: {
+  name: string;
+  tag: string;
+  namespace?: string;
+}): Promise<Blob> {
+  const response = await apiClient.get<Blob>(
+    `/registry-api/v0/hooks/${encodeURIComponent(input.name)}/${encodeURIComponent(input.tag)}/download`,
+    {
+      params: { namespace: input.namespace || "default" },
+      responseType: "blob",
+    },
+  );
+  return response.data;
+}
+
+export async function deleteHookPackage(input: {
+  name: string;
+  tag: string;
+  namespace?: string;
+}): Promise<void> {
+  await apiClient.delete(
+    `/registry-api/v0/hooks/${encodeURIComponent(input.name)}/${encodeURIComponent(input.tag)}`,
+    { params: { namespace: input.namespace || "default" } },
+  );
+}
+
+export async function publishHookPackage(input: {
+  name: string;
+  tag: string;
+  title?: string;
+  description: string;
+  language?: "pt-BR";
+  events: Record<string, HookMatcherGroup[]>;
+  files: Array<{
+    path: string;
+    content: string;
+    encoding: "utf-8" | "base64";
+    mode?: number;
+  }>;
+}): Promise<Record<string, unknown>> {
+  const response = await apiClient.put<Record<string, unknown>>(
+    `/api-proxy/api/v1/store/hooks/${encodeURIComponent(input.name)}/${encodeURIComponent(input.tag)}`,
+    { ...input, language: input.language || "pt-BR" },
+  );
+  return response.data;
+}
+
+/** Parse the draft's event map, returning either the value or a message. */
+export function parseHookEvents(
+  text: string,
+): { events: Record<string, HookMatcherGroup[]> } | { error: string } {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return { error: "O mapa de eventos precisa ser um JSON válido." };
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return { error: "O mapa de eventos precisa ser um objeto evento → grupos." };
+  }
+  const events = parsed as Record<string, unknown>;
+  if (Object.keys(events).length === 0) {
+    return { error: "Informe ao menos um evento." };
+  }
+  for (const [event, groups] of Object.entries(events)) {
+    if (!Array.isArray(groups) || groups.length === 0) {
+      return { error: `O evento ${event} precisa de ao menos um grupo de matcher.` };
+    }
+    for (const group of groups) {
+      const hooks = (group as HookMatcherGroup)?.hooks;
+      if (!Array.isArray(hooks) || hooks.length === 0) {
+        return { error: `Um grupo do evento ${event} está sem entradas em "hooks".` };
+      }
+    }
+  }
+  return { events: events as Record<string, HookMatcherGroup[]> };
 }
 
 export function normalizeRegistryItems(
@@ -405,6 +506,14 @@ export function validatePublishDraft(draft: PublishDraft, hasCompleteFiles = fal
   } else if (draft.kind === "skills") {
     if (!hasCompleteFiles && !draft.skillContent.trim()) {
       errors.push("Informe o conteúdo completo da Skill, incluindo SKILL.md.");
+    }
+  } else if (draft.kind === "hooks") {
+    if (!hasCompleteFiles && !draft.hookContent.trim()) {
+      errors.push("Informe o conteúdo completo do Hook, incluindo HOOK.md.");
+    }
+    const parsed = parseHookEvents(draft.hookEvents);
+    if ("error" in parsed) {
+      errors.push(parsed.error);
     }
   } else if (!draft.sourceRepository.trim()) {
     errors.push("Informe a URL do repositório de origem.");

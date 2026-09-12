@@ -14,6 +14,7 @@ import {
   Send,
   Store,
   TerminalSquare,
+  Webhook,
 } from "lucide-react";
 
 import { PageHeader } from "@/components/shared/PageHeader";
@@ -39,6 +40,11 @@ import {
   registrySourceSummary,
   downloadSkillPackage,
   deleteSkillPackage,
+  downloadHookPackage,
+  deleteHookPackage,
+  parseHookEvents,
+  PACKAGED_KINDS,
+  publishHookPackage as publishHookPackageRequest,
   publishSkillPackage as publishSkillPackageRequest,
   validatePublishDraft,
   type InstallRecipe,
@@ -56,11 +62,26 @@ const HIDDEN_ANNOTATION_PREFIXES = [
 
 const KIND_ICONS: Record<RegistryResourceKind, typeof Store> = {
   skills: TerminalSquare,
+  hooks: Webhook,
   mcpservers: Plug,
   prompts: FileText,
   agents: Bot,
   plugins: Puzzle,
 };
+
+/** Starting point for the event map, so the shape is obvious in the form. */
+const DEFAULT_HOOK_EVENTS = JSON.stringify(
+  {
+    PreToolUse: [
+      {
+        matcher: "Bash",
+        hooks: [{ type: "command", command: "python ${HOOK_DIR}/guard.py" }],
+      },
+    ],
+  },
+  null,
+  2,
+);
 
 const DEFAULT_DRAFT: PublishDraft = {
   kind: "skills",
@@ -71,6 +92,8 @@ const DEFAULT_DRAFT: PublishDraft = {
   sourceRepository: "",
   promptContent: "",
   skillContent: "",
+  hookContent: "",
+  hookEvents: DEFAULT_HOOK_EVENTS,
 };
 
 type KindFilter = RegistryResourceKind | "all";
@@ -131,6 +154,7 @@ export default function StorePage() {
       },
       {
         skills: 0,
+        hooks: 0,
         mcpservers: 0,
         prompts: 0,
         agents: 0,
@@ -153,6 +177,37 @@ export default function StorePage() {
     const errors = validatePublishDraft(draft, skillFiles.length > 0);
     setFormErrors(errors);
     if (errors.length > 0) return;
+    if (draft.kind === "hooks") {
+      const parsed = parseHookEvents(draft.hookEvents);
+      if ("error" in parsed) {
+        setFormErrors([parsed.error]);
+        return;
+      }
+      try {
+        const files = skillFiles.length
+          ? await Promise.all(skillFiles.map(async (file) => ({
+              path: relativeSkillPath(file),
+              content: await fileToBase64(file),
+              encoding: "base64" as const,
+              mode: 0o644,
+            })))
+          : [{ path: "HOOK.md", content: draft.hookContent, encoding: "utf-8" as const, mode: 0o644 }];
+        await publishHookPackageRequest({
+          name: draft.name.trim(),
+          tag: draft.tag.trim() || "latest",
+          title: draft.title.trim(),
+          description: draft.description.trim(),
+          events: parsed.events,
+          files,
+        });
+        setPackageMessage("Hook publicado com sucesso.");
+        setSkillFiles([]);
+        await loadCatalog();
+      } catch (error) {
+        setFormErrors([error instanceof Error ? error.message : "Falha ao publicar o Hook."]);
+      }
+      return;
+    }
     if (draft.kind === "skills" && (skillFiles.length > 0 || draft.skillContent.trim())) {
       try {
         const files = skillFiles.length
@@ -182,9 +237,12 @@ export default function StorePage() {
   };
 
   const handleDownload = async () => {
-    if (!selectedResource || selectedResource.registryKind !== "skills") return;
+    if (!selectedResource) return;
+    const isHook = selectedResource.registryKind === "hooks";
+    if (!isHook && selectedResource.registryKind !== "skills") return;
+    const download = isHook ? downloadHookPackage : downloadSkillPackage;
     try {
-      const blob = await downloadSkillPackage({
+      const blob = await download({
         name: selectedResource.metadata.name,
         tag: registryResourceTag(selectedResource),
         namespace: registryResourceNamespace(selectedResource),
@@ -198,7 +256,9 @@ export default function StorePage() {
       anchor.remove();
       URL.revokeObjectURL(url);
     } catch (error) {
-      setPackageMessage(error instanceof Error ? error.message : "Falha ao baixar a Skill completa.");
+      setPackageMessage(
+        error instanceof Error ? error.message : "Falha ao baixar o pacote completo.",
+      );
     }
   };
 
@@ -213,22 +273,25 @@ export default function StorePage() {
       sourceRepository: "",
       promptContent: "",
       skillContent: typeof skillMd === "string" ? skillMd : "",
+      hookContent: "",
+      hookEvents: hookEventsDraft(resource),
     });
     setPackageMessage("Modo de edição carregado. Selecione a pasta completa para substituir o pacote.");
   };
 
   const handleDelete = async (resource: RegistryResource) => {
     if (!window.confirm(`Excluir ${resource.metadata.name}@${registryResourceTag(resource)}?`)) return;
+    const isHook = resource.registryKind === "hooks";
     try {
-      await deleteSkillPackage({
+      await (isHook ? deleteHookPackage : deleteSkillPackage)({
         name: resource.metadata.name,
         tag: registryResourceTag(resource),
         namespace: registryResourceNamespace(resource),
       });
-      setPackageMessage("Skill excluída com sucesso.");
+      setPackageMessage(isHook ? "Hook excluído com sucesso." : "Skill excluída com sucesso.");
       await loadCatalog();
     } catch (error) {
-      setPackageMessage(error instanceof Error ? error.message : "Falha ao excluir a Skill.");
+      setPackageMessage(error instanceof Error ? error.message : "Falha ao excluir o recurso.");
     }
   };
 
@@ -450,6 +513,56 @@ export default function StorePage() {
                       className="mt-1 min-h-24 border-slate-700 bg-slate-950 font-mono text-slate-100"
                     />
                   </label>
+                ) : draft.kind === "hooks" ? (
+                  <>
+                    <label className="block text-sm font-medium text-slate-300">
+                      Eventos do hook (JSON)
+                      <Textarea
+                        aria-label="Eventos do hook"
+                        value={draft.hookEvents}
+                        onChange={(event) =>
+                          setDraft((current) => ({
+                            ...current,
+                            hookEvents: event.target.value,
+                          }))
+                        }
+                        className="mt-1 min-h-40 border-slate-700 bg-slate-950 font-mono text-xs text-slate-100"
+                      />
+                      <span className="mt-1 block text-xs font-normal text-slate-500">
+                        Mapa evento → grupos de matcher, como no settings.json. Use ${"{HOOK_DIR}"} nos
+                        comandos para apontar para arquivos do próprio pacote.
+                      </span>
+                    </label>
+                    <label className="block text-sm font-medium text-slate-300">
+                      Documentação (HOOK.md)
+                      <Textarea
+                        aria-label="Conteúdo do hook"
+                        value={draft.hookContent}
+                        onChange={(event) =>
+                          setDraft((current) => ({
+                            ...current,
+                            hookContent: event.target.value,
+                          }))
+                        }
+                        placeholder={"# Bloqueio de banco externo\n\nO que o hook faz e quando dispara."}
+                        className="mt-1 min-h-24 border-slate-700 bg-slate-950 font-mono text-xs text-slate-100"
+                      />
+                    </label>
+                    <label className="block text-sm font-medium text-slate-300">
+                      Pasta completa do Hook
+                      <Input
+                        aria-label="Arquivos completos do Hook"
+                        type="file"
+                        multiple
+                        {...({ webkitdirectory: "", directory: "" } as Record<string, string>)}
+                        onChange={(event) => setSkillFiles(Array.from(event.target.files ?? []))}
+                        className="mt-1 border-slate-700 bg-slate-950 text-slate-100"
+                      />
+                      <span className="mt-1 block text-xs font-normal text-slate-500">
+                        Selecione os scripts e o HOOK.md. Sem pasta, apenas o HOOK.md acima é publicado.
+                      </span>
+                    </label>
+                  </>
                 ) : draft.kind === "skills" ? (
                   <>
                     <label className="block text-sm font-medium text-slate-300">
@@ -706,6 +819,10 @@ function ResourceDetailCard({
 
   const sourceSummary = registrySourceSummary(resource);
   const dependencySummary = registryDependencySummary(resource);
+  // Skills and Hooks ship a package, so they are the kinds with a ZIP to
+  // download and a tag to edit or delete from the UI.
+  const isPackagedKind = PACKAGED_KINDS.includes(resource.registryKind);
+  const hookEvents = hookEventSummary(resource);
   const labels = Object.entries(resource.metadata.labels ?? {});
   const annotations = Object.entries(resource.metadata.annotations ?? {}).filter(
     ([key, value]) =>
@@ -741,6 +858,16 @@ function ResourceDetailCard({
             {registryResourceNamespace(resource)}/{resource.metadata.name}
           </p>
         </div>
+
+        {hookEvents.length ? (
+          <DetailSection title="Eventos">
+            {hookEvents.map((summary) => (
+              <li key={summary} className="break-all">
+                {summary}
+              </li>
+            ))}
+          </DetailSection>
+        ) : null}
 
         <DetailSection title="Origem">
           {sourceSummary.length ? (
@@ -813,7 +940,7 @@ function ResourceDetailCard({
             <Download className="mr-2 h-4 w-4" />
             {installing ? "Gerando receita..." : "Gerar receita de instalação"}
           </Button>
-          {resource.registryKind === "skills" ? (
+          {isPackagedKind ? (
             <Button
               type="button"
               variant="outline"
@@ -821,10 +948,12 @@ function ResourceDetailCard({
               className="mt-2 w-full border-slate-700 bg-slate-900 text-slate-200 hover:bg-slate-800 hover:text-white"
             >
               <Download className="mr-2 h-4 w-4" />
-              Baixar Skill completa (.zip)
+              {resource.registryKind === "hooks"
+                ? "Baixar Hook completo (.zip)"
+                : "Baixar Skill completa (.zip)"}
             </Button>
           ) : null}
-          {resource.registryKind === "skills" ? (
+          {isPackagedKind ? (
             <div className="mt-2 grid grid-cols-2 gap-2">
               <Button type="button" variant="outline" onClick={onEdit} className="border-slate-700 bg-slate-900 text-slate-200">
                 Editar
@@ -888,6 +1017,36 @@ function DetailSection({
       </ul>
     </div>
   );
+}
+
+/** One readable line per event: "PreToolUse · Bash → command: guard.py". */
+function hookEventSummary(resource: RegistryResource): string[] {
+  if (resource.registryKind !== "hooks") return [];
+  const events = (resource.spec as Record<string, unknown> | undefined)?.events;
+  if (!events || typeof events !== "object") return [];
+  const lines: string[] = [];
+  for (const [event, groups] of Object.entries(events as Record<string, unknown>)) {
+    if (!Array.isArray(groups)) continue;
+    for (const group of groups) {
+      const record = group as { matcher?: string; hooks?: Array<Record<string, unknown>> };
+      const matcher = record.matcher ? ` · ${record.matcher}` : "";
+      for (const entry of record.hooks ?? []) {
+        const type = String(entry.type ?? "?");
+        const detail =
+          entry.command ?? entry.url ?? entry.prompt ?? entry.tool ?? "";
+        lines.push(`${event}${matcher} → ${type}${detail ? `: ${detail}` : ""}`);
+      }
+    }
+  }
+  return lines;
+}
+
+/** Pre-fill the event editor with the hook's published events when editing. */
+function hookEventsDraft(resource: RegistryResource): string {
+  if (resource.registryKind !== "hooks") return DEFAULT_HOOK_EVENTS;
+  const events = (resource.spec as Record<string, unknown> | undefined)?.events;
+  if (!events || typeof events !== "object") return DEFAULT_HOOK_EVENTS;
+  return JSON.stringify(events, null, 2);
 }
 
 function relativeSkillPath(file: File): string {

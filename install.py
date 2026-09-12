@@ -47,7 +47,8 @@ Atualização (preserva memórias):
 
   O --update faz: git pull (ou --no-pull explícito) → rebuild de API/UI → migrations
   aditivas (produção) → recria os containers de app no lugar → rebuild/healthcheck
-  dos sidecars (agentregistry/planka, profile ``sidecars``). NUNCA remove volumes, então
+  dos sidecars (agentregistry/planka, profile ``sidecars``) → confere se a Store
+  responde em todas as coleções (skills, hooks). NUNCA remove volumes, então
   Qdrant + SQLite/PostgreSQL e os segredos do .env permanecem intactos.
   Não para Qdrant/Postgres/Redis no meio do rebuild (se o build falhar, dados
   continuam no ar). Preenche defaults vazios de S3/MinIO e PLANKA no .env
@@ -730,6 +731,43 @@ def wait_for_agentregistry(dc, timeout=120, interval=2):
     return False
 
 
+def wait_for_store_kinds(dc, kinds=("skills", "hooks"), timeout=60, interval=2):
+    """Confere se o Agent Registry já serve cada coleção da Store.
+
+    O ``/v0/ping`` responde antes de o binário novo estar completo: uma imagem
+    antiga ainda sobe e passa no ping, mas devolve 404 na coleção de um kind
+    recém-adicionado (``hooks``). Checar as coleções transforma uma Store
+    quebrada — que só apareceria ao publicar — em um aviso na atualização.
+    """
+    pending = list(kinds)
+    deadline = time.time() + timeout
+    while pending and time.time() < deadline:
+        still_missing = []
+        for kind in pending:
+            probe = dc(
+                "exec", "-T", "agentregistry", "wget", "-qO-",
+                f"http://127.0.0.1:8080/v0/{kind}?namespace=default&limit=1",
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            if probe.returncode != 0:
+                still_missing.append(kind)
+        pending = still_missing
+        if pending:
+            time.sleep(min(interval, max(0, deadline - time.time())))
+    if pending:
+        warn(
+            "A Store não respondeu nestas coleções: " + ", ".join(pending) + ".\n"
+            "    Costuma ser imagem antiga do agentregistry ou migração do Registry "
+            "pendente. Reconstrua o sidecar:\n"
+            "    COMPOSE_PROFILES=sidecars docker compose -f docker-compose.scale.yml "
+            "up -d --no-deps --build agentregistry"
+        )
+        return False
+    ok("Store servindo todas as coleções (" + ", ".join(kinds) + ").")
+    return True
+
+
 def ensure_sidecars_after_update(dc, timeout=120):
     """Sobe Store (agentregistry) + Kanban (planka) com profile ``sidecars``.
 
@@ -755,6 +793,10 @@ def ensure_sidecars_after_update(dc, timeout=120):
             "O container agentregistry iniciou, mas a API ainda não está saudável. "
             "Verifique os logs antes de usar a Store."
         )
+        return False
+    # O ping só diz que o processo subiu. As coleções dizem que o binário
+    # novo está mesmo no ar, incluindo os kinds adicionados nesta versão.
+    if not wait_for_store_kinds(dc, timeout=min(timeout, 60)):
         return False
     ok("Sidecars agentregistry + planka no ar; Agent Registry saudável.")
     return True

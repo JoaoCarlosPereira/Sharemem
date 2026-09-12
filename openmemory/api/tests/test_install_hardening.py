@@ -280,3 +280,37 @@ class TestInstallerUpdatePull:
         src = _INSTALL_PATH.read_text(encoding="utf-8")
         assert "if not git_pull():" in src
         assert "use --no-pull" in src
+
+
+class TestStoreKindsAfterUpdate:
+    """A Store só está pronta quando o Registry serve todas as coleções."""
+
+    @staticmethod
+    def _dc(failures):
+        """docker compose falso: falha nas coleções listadas em ``failures``."""
+        calls = []
+
+        def dc(*args, **kwargs):
+            calls.append(args)
+            url = next((arg for arg in args if str(arg).startswith("http")), "")
+            rc = 1 if any(f"/v0/{kind}?" in url for kind in failures) else 0
+            return SimpleNamespace(returncode=rc)
+
+        dc.calls = calls
+        return dc
+
+    def test_todas_as_colecoes_no_ar(self):
+        dc = self._dc(failures=())
+        assert install.wait_for_store_kinds(dc, timeout=1) is True
+
+    def test_kind_novo_ausente_avisa_em_vez_de_passar(self):
+        """Imagem antiga do agentregistry passa no ping mas não serve hooks."""
+        dc = self._dc(failures=("hooks",))
+        assert install.wait_for_store_kinds(dc, timeout=1, interval=0) is False
+
+    def test_hooks_fazem_parte_do_check_padrao(self):
+        dc = self._dc(failures=())
+        install.wait_for_store_kinds(dc, timeout=1)
+        probed = [str(arg) for call in dc.calls for arg in call if str(arg).startswith("http")]
+        assert any("/v0/hooks?" in url for url in probed)
+        assert any("/v0/skills?" in url for url in probed)

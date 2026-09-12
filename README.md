@@ -197,7 +197,7 @@ Same for `host=claude-code` and `host=codex`.
 | **Memory** | `add_memories`, `search_memory`, `list_memories`, `mark_obsolete` | Shared project memory |
 | **SDD / Specs** | `create_spec_workspace`, `write_spec_document`, `read_spec_document`, `search_specs` | PRD / TechSpec / Tasks / ADRs |
 | **Kanban tasks** | `create_task`, `claim_task`, `update_task_status`, `list_tasks`, `add_spec_comment` | Pipeline without skipping columns |
-| **Store** | `search_catalog`, `get_catalog_resource`, `publish_skill_package`, `get_install_recipe` | Internal skills / MCP catalog |
+| **Store** | `search_catalog`, `get_catalog_resource`, `publish_skill_package`, `publish_hook_package`, `get_install_recipe` | Internal catalog: skills, hooks, MCP servers, prompts, agents, plugins |
 
 `project` is required on memory tools. Spec/Kanban tools use `project_id` + workspace.
 

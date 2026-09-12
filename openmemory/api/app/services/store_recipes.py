@@ -19,12 +19,18 @@ from app.utils.agentregistry import (
     AgentRegistryResourceNotFound,
 )
 
-CatalogKind = Literal["skill", "mcpserver", "prompt", "agent", "plugin"]
+CatalogKind = Literal["skill", "hook", "mcpserver", "prompt", "agent", "plugin"]
 InstallTarget = Literal["cursor", "claude", "codex"]
 
 RECIPE_VERSION = "1"
 
 SKILL_ARTIFACT_MEDIA_TYPE = "application/vnd.agentregistry.skill.v1.tar+gzip"
+HOOK_ARTIFACT_MEDIA_TYPE = "application/vnd.agentregistry.hook.v1.tar+gzip"
+
+# Placeholder a hook command uses to reach a file shipped in its own package.
+# The host expands it to the directory the package was extracted into, which is
+# only known at install time.
+HOOK_DIR_PLACEHOLDER = "HOOK_DIR"
 
 # Recipes are applied by hosts that only reach the public API, never the
 # AgentRegistry backend directly, so the artifact endpoint must be the public
@@ -41,6 +47,7 @@ TARGET_DESTINATIONS: dict[str, dict[str, str]] = {
     },
     "claude": {
         "agent": "~/.claude/agents/{name}.json",
+        "hook": "~/.claude/settings.json",
         "mcpserver": ".mcp.json",
         "plugin": "~/.claude/plugins/{name}",
         "prompt": "~/.claude/prompts/{name}.md",
@@ -53,6 +60,12 @@ TARGET_DESTINATIONS: dict[str, dict[str, str]] = {
         "prompt": "~/.codex/prompts/{name}.md",
         "skill": "~/.codex/skills/{name}",
     },
+}
+
+# Where a hook's package files land. Commands reach them through
+# ${HOOK_DIR}, expanded to this path by the host.
+HOOK_PACKAGE_DESTINATIONS: dict[str, str] = {
+    "claude": "~/.claude/hooks/{name}",
 }
 
 _SAFE_SEGMENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -137,6 +150,8 @@ class InstallRecipeService:
 
         if safe_kind == "mcpserver":
             steps = _mcp_steps(safe_target, safe_name, destination, spec, source)
+        elif safe_kind == "hook":
+            steps = _hook_steps(safe_target, safe_name, destination, spec, source)
         else:
             steps = _file_steps(safe_kind, safe_name, destination, source, spec)
 
@@ -162,7 +177,10 @@ class InstallRecipeService:
             },
             "source": source,
             "steps": steps,
-            "rollback": _rollback_steps(destination),
+            "rollback": _rollback_steps(
+                destination,
+                _hook_package_destination(safe_target, safe_name) if safe_kind == "hook" else None,
+            ),
         }
 
 
@@ -212,13 +230,18 @@ def _spec(resource: dict[str, Any]) -> dict[str, Any]:
 
 
 def _destination(kind: str, target: str, name: str) -> str:
-    template = TARGET_DESTINATIONS[target][kind]
+    template = TARGET_DESTINATIONS[target].get(kind)
+    if not template:
+        raise InstallRecipeValidationError(
+            f"o alvo {target} não suporta recursos do tipo {kind}"
+        )
     return template.format(name=name)
 
 
 def _registry_kind_name(kind: str) -> str:
     return {
         "agent": "Agent",
+        "hook": "Hook",
         "mcpserver": "MCPServer",
         "plugin": "Plugin",
         "prompt": "Prompt",
@@ -239,15 +262,19 @@ def _resolve_source(kind: str, resource: dict[str, Any], spec: dict[str, Any]) -
     # Skills published as complete packages are self-contained. Prefer the
     # immutable AgentRegistry artifact even if an older metadata record still
     # carries a Git repository for provenance.
-    if kind == "skill":
+    if kind in ("skill", "hook"):
         resolved_artifact = resolved.get("artifact")
         if isinstance(resolved_artifact, dict) and resolved_artifact.get("digest"):
+            default_media_type = (
+                SKILL_ARTIFACT_MEDIA_TYPE if kind == "skill" else HOOK_ARTIFACT_MEDIA_TYPE
+            )
+            collection = "skills" if kind == "skill" else "hooks"
             return {
                 "type": "registry_artifact",
-                "media_type": resolved_artifact.get("mediaType") or SKILL_ARTIFACT_MEDIA_TYPE,
+                "media_type": resolved_artifact.get("mediaType") or default_media_type,
                 "artifact_digest": resolved_artifact.get("digest"),
                 "size": resolved_artifact.get("size"),
-                "endpoint": f"{STORE_API_PREFIX}/skills/{quote(str(metadata.get('name') or 'skill'), safe='')}/{quote(str(metadata.get('tag') or 'latest'), safe='')}/artifact",
+                "endpoint": f"{STORE_API_PREFIX}/{collection}/{quote(str(metadata.get('name') or kind), safe='')}/{quote(str(metadata.get('tag') or 'latest'), safe='')}/artifact",
             }
 
     repository = _first_dict(
@@ -358,6 +385,102 @@ def _file_steps(
     ]
 
 
+def _hook_package_destination(target: str, name: str) -> Optional[str]:
+    template = HOOK_PACKAGE_DESTINATIONS.get(target)
+    return template.format(name=name) if template else None
+
+
+def _hook_steps(
+    target: str,
+    name: str,
+    destination: str,
+    spec: dict[str, Any],
+    source: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Install a hook: extract its package, then merge its events into settings.
+
+    ``destination`` is the harness settings file. The package (scripts plus
+    HOOK.md) is extracted next to it under HOOK_PACKAGE_DESTINATIONS, and the
+    merge step carries the expansion for ${HOOK_DIR} so commands resolve to the
+    files that were just extracted.
+    """
+    events = spec.get("events")
+    if not isinstance(events, dict) or not events:
+        raise InstallRecipeValidationError("hook sem eventos declarados")
+
+    package_destination = _hook_package_destination(target, name)
+    if not package_destination:
+        raise InstallRecipeValidationError(f"o alvo {target} não suporta hooks")
+
+    steps: list[dict[str, Any]] = [
+        {
+            "id": "backup-settings",
+            "type": "backup",
+            "path": destination,
+            "if_exists": True,
+        }
+    ]
+
+    if source.get("type") == "registry_artifact":
+        steps.append(
+            {
+                "id": "download-and-extract-hook-package",
+                "type": "download_and_extract",
+                "description": (
+                    "Baixe o artefato em from.endpoint, confira o sha256 e "
+                    "extraia em to — é a pasta que ${HOOK_DIR} representa."
+                ),
+                "from": source,
+                "to": package_destination,
+                "overwrite": True,
+                "idempotent": True,
+                "verify_artifact_sha256": source.get("artifact_digest"),
+            }
+        )
+
+    steps.append(
+        {
+            "id": "merge-hook-events",
+            "type": "merge_hooks",
+            # merge_hooks é um tipo de passo novo e quem aplica a receita é um
+            # agente lendo este JSON — a descrição evita depender de convenção.
+            "description": (
+                "Para cada evento em content.hooks, some os grupos ao bloco "
+                "hooks do arquivo em path, preservando o que já existe. "
+                "Antes de escrever, troque ${HOOK_DIR} pelos valores de "
+                "placeholders. Se já houver entrada idêntica deste mesmo hook, "
+                "substitua no lugar em vez de acrescentar."
+            ),
+            "path": destination,
+            # `key` names the settings block the events belong under, so a host
+            # that only knows merge_json can still place them correctly.
+            "key": "hooks",
+            "content": {"hooks": events},
+            # Entries are matched by (matcher, action) inside each event and
+            # replaced rather than appended, so reinstalling the same tag twice
+            # leaves one copy — never a duplicated hook that fires twice.
+            "strategy": "replace_owned_entries",
+            "owner": {"kind": "hook", "name": name},
+            "placeholders": {HOOK_DIR_PLACEHOLDER: package_destination},
+            "idempotent": True,
+        }
+    )
+
+    steps.append(
+        {
+            "id": "verify-hook-install",
+            "type": "verify",
+            "path": destination,
+            "checks": [
+                {"type": "exists"},
+                {"type": "config_key", "key": "hooks"},
+                *[{"type": "config_key", "key": f"hooks.{event}"} for event in sorted(events)],
+            ],
+        }
+    )
+    return steps
+
+
 def _mcp_steps(
     target: str,
     name: str,
@@ -465,8 +588,11 @@ def _codex_mcp_toml(name: str, entry: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _rollback_steps(destination: str) -> list[dict[str, Any]]:
-    return [
+def _rollback_steps(
+    destination: str,
+    package_destination: Optional[str] = None,
+) -> list[dict[str, Any]]:
+    steps: list[dict[str, Any]] = [
         {
             "id": "restore-backup",
             "type": "restore_backup",
@@ -474,3 +600,15 @@ def _rollback_steps(destination: str) -> list[dict[str, Any]]:
             "if_backup_exists": True,
         }
     ]
+    if package_destination:
+        # The settings backup restores the event entries; the extracted package
+        # has no backup to restore, so it is removed outright.
+        steps.append(
+            {
+                "id": "remove-hook-package",
+                "type": "remove",
+                "path": package_destination,
+                "if_exists": True,
+            }
+        )
+    return steps

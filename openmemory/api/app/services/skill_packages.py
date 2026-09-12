@@ -83,9 +83,24 @@ def _validate_pt_br(text: str, field: str) -> None:
 
 def build_skill_archive(payload: SkillPackageInput) -> tuple[bytes, list[dict[str, Any]]]:
     _validate_pt_br(payload.description, "description")
+    return _build_archive(payload.files, required_root_file="SKILL.md", label="Skill")
+
+
+def _build_archive(
+    inputs: list[SkillFileInput],
+    *,
+    required_root_file: str,
+    label: str,
+) -> tuple[bytes, list[dict[str, Any]]]:
+    """Pack a validated directory into a reproducible tar.gz.
+
+    Shared by every packaged kind (Skill, Hook): the limits, the PT-BR check on
+    text files and the deterministic archive layout are identical; only the
+    mandatory root file differs.
+    """
     files: dict[str, tuple[bytes, int]] = {}
     total = 0
-    for file in payload.files:
+    for file in inputs:
         _validate_path(file.path)
         if file.path in files:
             raise ValueError(f"arquivo duplicado: {file.path}")
@@ -102,8 +117,8 @@ def build_skill_archive(payload: SkillPackageInput) -> tuple[bytes, list[dict[st
                 raise ValueError(f"arquivo textual inválido: {file.path}") from exc
         files[file.path] = (content, file.mode)
 
-    if "SKILL.md" not in files:
-        raise ValueError("SKILL.md é obrigatório na raiz da Skill")
+    if required_root_file not in files:
+        raise ValueError(f"{required_root_file} é obrigatório na raiz do {label}")
 
     output = io.BytesIO()
     with gzip.GzipFile(fileobj=output, mode="wb", mtime=0) as gz:
