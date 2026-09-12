@@ -76,6 +76,16 @@ func init() {
 	))
 
 	scheme.Register(typedKind(
+		"hook", "hooks", []string{"Hook"},
+		[]scheme.Column{
+			{Header: "NAME"}, {Header: "TAG"}, {Header: "EVENTS"}, {Header: "DESCRIPTION"},
+		},
+		v1alpha1.KindHook,
+		func() *v1alpha1.Hook { return &v1alpha1.Hook{} },
+		hookRow,
+	))
+
+	scheme.Register(typedKind(
 		"prompt", "prompts", []string{"Prompt"},
 		[]scheme.Column{{Header: "NAME"}, {Header: "TAG"}, {Header: "DESCRIPTION"}},
 		v1alpha1.KindPrompt,

@@ -1313,7 +1313,7 @@ def _current_mcp_actor_id() -> str:
     return hostname or "mcp"
 
 
-@mcp.tool(description="Search the internal ShareMem catalog across skills, MCP servers, prompts, agents and plugins via AgentRegistry. Safe read-only operation. `query` may be empty to list recent resources; `kind` optionally narrows to skill|mcpserver|prompt|agent|plugin. Returns JSON results with summaries and raw resources.")
+@mcp.tool(description="Search the internal ShareMem catalog across skills, hooks, MCP servers, prompts, agents and plugins via AgentRegistry. Safe read-only operation. `query` may be empty to list recent resources; `kind` optionally narrows to skill|hook|mcpserver|prompt|agent|plugin. Returns JSON results with summaries and raw resources.")
 async def search_catalog(
     query: str = "",
     kind: str | None = None,
@@ -1467,6 +1467,100 @@ async def publish_skill_package(
         )
     except (ValueError, AgentRegistryError) as e:
         return f"Error: {getattr(e, 'detail', str(e))}"
+    except Exception as e:  # noqa: BLE001
+        logging.exception(e)
+        return f"Error: {e}"
+
+
+@mcp.tool(description="Publica um Hook completo na Store. Informe nome, descrição em PT-BR, o mapa de eventos (ex.: {\"PreToolUse\": [{\"matcher\": \"Bash\", \"hooks\": [{\"type\": \"command\", \"command\": \"python ${HOOK_DIR}/guard.py\"}]}]}) e todos os arquivos da pasta, incluindo HOOK.md. Use ${HOOK_DIR} nos comandos para apontar para arquivos do próprio pacote. Exige pedido explícito e confirm_user_requested=true.")
+async def publish_hook_package(
+    name: str,
+    description: str,
+    events: dict[str, Any],
+    files: list[dict[str, Any]],
+    tag: str = "latest",
+    title: str | None = None,
+    language: str = "pt-BR",
+    confirm_user_requested: bool = False,
+) -> str:
+    try:
+        from app.services.hook_packages import (
+            HookPackageInput,
+            build_hook_archive,
+            validate_command_references,
+        )
+        from app.utils.agentregistry import AgentRegistryError
+
+        if not confirm_user_requested:
+            return "Error: publish_hook_package exige pedido explícito do desenvolvedor (confirm_user_requested=true)"
+        payload = HookPackageInput(
+            name=name,
+            tag=tag,
+            title=title,
+            description=description,
+            language=language,
+            events=events,
+            files=files,
+        )
+        validate_command_references(payload)
+        archive, inventory = build_hook_archive(payload)
+        client = get_agent_registry_client()
+        resource = {
+            "apiVersion": "ar.dev/v1alpha1",
+            "kind": "Hook",
+            "metadata": {"name": name, "tag": tag},
+            "spec": {
+                "title": title or name,
+                "description": description,
+                "language": language,
+                "events": payload.to_registry_events(),
+            },
+        }
+        auth_headers = _registry_auth_headers_for_mcp()
+        apply_result = await client.apply_resource(resource=resource, auth_headers=auth_headers)
+        artifact_result = await client.put_package_artifact(
+            kind="hook", name=name, tag=tag, archive=archive, auth_headers=auth_headers
+        )
+        return json.dumps(
+            {
+                "resource": resource,
+                "apply": apply_result,
+                "artifact": {
+                    "sha256": hashlib.sha256(archive).hexdigest(),
+                    "size": len(archive),
+                    "files": inventory,
+                    "transport": artifact_result,
+                },
+            },
+            default=str,
+        )
+    except (ValueError, AgentRegistryError) as e:
+        return f"Error: {getattr(e, 'detail', str(e))}"
+    except Exception as e:  # noqa: BLE001
+        logging.exception(e)
+        return f"Error: {e}"
+
+
+@mcp.tool(description="Exclui um Hook completo da Store por nome e tag. Operação irreversível no catálogo e exige pedido explícito com confirm_user_requested=true.")
+async def delete_hook_package(
+    name: str,
+    tag: str = "latest",
+    confirm_user_requested: bool = False,
+) -> str:
+    try:
+        from app.utils.agentregistry import AgentRegistryError
+
+        if not confirm_user_requested:
+            return "Error: delete_hook_package exige pedido explícito do desenvolvedor (confirm_user_requested=true)"
+        result = await get_agent_registry_client().delete_resource(
+            kind="hook",
+            name=name,
+            tag=tag,
+            auth_headers=_registry_auth_headers_for_mcp(),
+        )
+        return json.dumps({"deleted": True, "name": name, "tag": tag, "result": result})
+    except AgentRegistryError as e:
+        return f"Error: {e.detail}"
     except Exception as e:  # noqa: BLE001
         logging.exception(e)
         return f"Error: {e}"

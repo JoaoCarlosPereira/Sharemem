@@ -16,17 +16,41 @@ import (
 	pkgdb "github.com/agentregistry-dev/agentregistry/pkg/registry/database"
 )
 
+// PostgresArtifactStore associates one immutable package per (namespace,
+// name, tag) of a single kind. The package bytes live in the shared,
+// content-addressed `artifacts` table; linkTable is the per-kind association
+// table (skill_artifacts, hook_artifacts) that points at a digest and carries
+// the foreign key back to the kind's content rows.
 type PostgresArtifactStore struct {
-	pool                *pgxpool.Pool
-	artifactsTable      string
-	skillArtifactsTable string
+	pool           *pgxpool.Pool
+	artifactsTable string
+	linkTable      string
+	// label names the kind in error messages ("skill", "hook").
+	label string
 }
 
+// NewPostgresArtifactStore binds the store to the Skill association table.
 func NewPostgresArtifactStore(pool *pgxpool.Pool, schema pkgdb.Schema) *PostgresArtifactStore {
+	return newPostgresArtifactStore(pool, schema, "skill_artifacts", "skill")
+}
+
+// NewPostgresHookArtifactStore binds the store to the Hook association table.
+// Hooks that ship executable files package them exactly like a complete Skill.
+func NewPostgresHookArtifactStore(pool *pgxpool.Pool, schema pkgdb.Schema) *PostgresArtifactStore {
+	return newPostgresArtifactStore(pool, schema, "hook_artifacts", "hook")
+}
+
+func newPostgresArtifactStore(
+	pool *pgxpool.Pool,
+	schema pkgdb.Schema,
+	linkTable string,
+	label string,
+) *PostgresArtifactStore {
 	return &PostgresArtifactStore{
-		pool:                pool,
-		artifactsTable:      schema.Qualify("artifacts"),
-		skillArtifactsTable: schema.Qualify("skill_artifacts"),
+		pool:           pool,
+		artifactsTable: schema.Qualify("artifacts"),
+		linkTable:      schema.Qualify(linkTable),
+		label:          label,
 	}
 }
 
@@ -45,7 +69,7 @@ func (s *PostgresArtifactStore) Put(ctx context.Context, ref artifact.SkillRef, 
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return artifact.Descriptor{}, fmt.Errorf("begin skill artifact transaction: %w", err)
+		return artifact.Descriptor{}, fmt.Errorf("begin %s artifact transaction: %w", s.label, err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	if _, err := tx.Exec(ctx, fmt.Sprintf(`
@@ -60,12 +84,12 @@ func (s *PostgresArtifactStore) Put(ctx context.Context, ref artifact.SkillRef, 
 		VALUES ($1, $2, $3, $4)
 		ON CONFLICT (namespace, name, tag) DO UPDATE
 		SET digest = EXCLUDED.digest
-		WHERE %s.digest IS DISTINCT FROM EXCLUDED.digest`, s.skillArtifactsTable, s.skillArtifactsTable),
+		WHERE %s.digest IS DISTINCT FROM EXCLUDED.digest`, s.linkTable, s.linkTable),
 		ref.Namespace, ref.Name, ref.Tag, descriptor.Digest); err != nil {
-		return artifact.Descriptor{}, fmt.Errorf("associate skill artifact: %w", err)
+		return artifact.Descriptor{}, fmt.Errorf("associate %s artifact: %w", s.label, err)
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return artifact.Descriptor{}, fmt.Errorf("commit skill artifact transaction: %w", err)
+		return artifact.Descriptor{}, fmt.Errorf("commit %s artifact transaction: %w", s.label, err)
 	}
 	return descriptor, nil
 }
@@ -79,17 +103,17 @@ func (s *PostgresArtifactStore) Get(ctx context.Context, ref artifact.SkillRef) 
 		SELECT a.digest, a.media_type, a.size_bytes, a.archive
 		FROM %s sa
 		JOIN %s a ON a.digest = sa.digest
-		WHERE sa.namespace=$1 AND sa.name=$2 AND sa.tag=$3`, s.skillArtifactsTable, s.artifactsTable),
+		WHERE sa.namespace=$1 AND sa.name=$2 AND sa.tag=$3`, s.linkTable, s.artifactsTable),
 		ref.Namespace, ref.Name, ref.Tag,
 	).Scan(&result.Digest, &result.MediaType, &result.Size, &result.Archive)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, pkgdb.ErrNotFound
 	}
 	if err != nil {
-		return nil, fmt.Errorf("get skill artifact: %w", err)
+		return nil, fmt.Errorf("get %s artifact: %w", s.label, err)
 	}
 	if int64(len(result.Archive)) != result.Size {
-		return nil, fmt.Errorf("get skill artifact: size mismatch for digest %s", result.Digest)
+		return nil, fmt.Errorf("get %s artifact: size mismatch for digest %s", s.label, result.Digest)
 	}
 	return &result, nil
 }
@@ -109,14 +133,14 @@ func (s *PostgresArtifactStore) ListFiles(ctx context.Context, ref artifact.Skil
 	}
 	files, err := artifact.Validate(stored.Archive)
 	if err != nil {
-		return nil, fmt.Errorf("list skill artifact files: %w", err)
+		return nil, fmt.Errorf("list %s artifact files: %w", s.label, err)
 	}
 	return files, nil
 }
 
 func validateArtifactRef(ref artifact.SkillRef) error {
 	if ref.Namespace == "" || ref.Name == "" || ref.Tag == "" {
-		return errors.New("skill artifact reference requires namespace, name, and tag")
+		return errors.New("artifact reference requires namespace, name, and tag")
 	}
 	return nil
 }

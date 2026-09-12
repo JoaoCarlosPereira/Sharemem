@@ -128,7 +128,7 @@ func (c *DeploymentController) HandleEvent(ctx context.Context, event v1alpha1st
 	switch event.Key.Kind {
 	case v1alpha1.KindDeployment:
 		return c.reconcileDeployment(ctx, event.Key)
-	case v1alpha1.KindRuntime, v1alpha1.KindAgent, v1alpha1.KindMCPServer, v1alpha1.KindPlugin, v1alpha1.KindSkill, v1alpha1.KindPrompt, v1alpha1.KindModel:
+	case v1alpha1.KindRuntime, v1alpha1.KindAgent, v1alpha1.KindMCPServer, v1alpha1.KindPlugin, v1alpha1.KindSkill, v1alpha1.KindHook, v1alpha1.KindPrompt, v1alpha1.KindModel:
 		return c.FullReconcile(ctx)
 	default:
 		if c.DependencyKinds[event.Key.Kind] {

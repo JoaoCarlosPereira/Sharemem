@@ -32,6 +32,7 @@ func main() {
 			v1alpha1.KindMCPServer:  catalogAuthorizer,
 			v1alpha1.KindSkill:      catalogAuthorizer,
 			v1alpha1.KindPlugin:     catalogAuthorizer,
+			v1alpha1.KindHook:       catalogAuthorizer,
 			v1alpha1.KindPrompt:     catalogAuthorizer,
 			v1alpha1.KindModel:      catalogAuthorizer,
 			v1alpha1.KindRuntime:    catalogAuthorizer,

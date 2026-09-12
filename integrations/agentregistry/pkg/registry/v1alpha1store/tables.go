@@ -17,6 +17,7 @@ var builtInKinds = map[string]struct{}{
 	v1alpha1.KindMCPServer:  {},
 	v1alpha1.KindSkill:      {},
 	v1alpha1.KindPlugin:     {},
+	v1alpha1.KindHook:       {},
 	v1alpha1.KindPrompt:     {},
 	v1alpha1.KindRuntime:    {},
 	v1alpha1.KindModel:      {},

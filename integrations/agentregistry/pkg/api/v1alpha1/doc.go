@@ -1,7 +1,7 @@
 // Package v1alpha1 defines the Kubernetes-style API types for all agentregistry
 // resources.
 //
-// Every resource — Agent, MCPServer, Skill, Prompt, Deployment, Runtime, Model —
+// Every resource — Agent, MCPServer, Skill, Hook, Prompt, Deployment, Runtime, Model —
 // uses the same envelope: apiVersion + kind + metadata + spec + status.
 // These types are the single wire/storage/API contract propagating from a YAML
 // manifest through the HTTP handler, Go client, service layer, and database
@@ -28,6 +28,7 @@ const (
 	KindMCPServer  = "MCPServer"
 	KindSkill      = "Skill"
 	KindPlugin     = "Plugin"
+	KindHook       = "Hook"
 	KindPrompt     = "Prompt"
 	KindDeployment = "Deployment"
 	KindRuntime    = "Runtime"

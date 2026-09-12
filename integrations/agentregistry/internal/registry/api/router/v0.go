@@ -53,6 +53,11 @@ type RouteOptions struct {
 	// Mem0 Shared artifact tables.
 	SkillArtifactStore types.SkillArtifactStore
 
+	// HookArtifactStore enables complete Hook package upload/download routes.
+	// Optional for the same reason as SkillArtifactStore: the upstream OSS
+	// registry boots without the Mem0 Shared artifact tables.
+	HookArtifactStore types.SkillArtifactStore
+
 	// DeploymentLogResolver supports the Deployment logs subresource. Adapter
 	// Apply/Remove side effects are owned by the Deployment controller, not by
 	// CRUD hook wiring.
@@ -139,6 +144,7 @@ func RegisterRoutes(
 		opts.ResolverWrapper,
 		opts.ExtraResourceRoutes,
 		opts.SkillArtifactStore,
+		opts.HookArtifactStore,
 	)
 
 	if opts.ExtraRoutes != nil {
@@ -192,6 +198,7 @@ func registerKindRoutes(
 	resolverWrapper func(v1alpha1.ResolverFunc) v1alpha1.ResolverFunc,
 	extraResourceRoutes func(api huma.API, pathPrefix string, ctx types.ResourceRouteContext),
 	skillArtifacts types.SkillArtifactStore,
+	hookArtifacts types.SkillArtifactStore,
 ) resource.ApplyConfig {
 	resolver := internaldb.NewResolver(stores)
 	if resolverWrapper != nil {
@@ -208,6 +215,17 @@ func registerKindRoutes(
 			BasePrefix: basePrefix,
 			Store:      skillArtifacts,
 			Authorize:  perKind.Authorizers[v1alpha1.KindSkill],
+		})
+	}
+	if hookArtifacts != nil {
+		skillartifact.Register(api, skillartifact.Config{
+			BasePrefix: basePrefix,
+			Store:      hookArtifacts,
+			Authorize:  perKind.Authorizers[v1alpha1.KindHook],
+			Kind:       v1alpha1.KindHook,
+			Plural:     v1alpha1.PluralFor(v1alpha1.KindHook),
+			MediaType:  skillartifact.HookMediaType,
+			Label:      v1alpha1.KindHook,
 		})
 	}
 

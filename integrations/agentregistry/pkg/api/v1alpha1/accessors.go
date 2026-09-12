@@ -17,7 +17,7 @@ func (m *ObjectMeta) SetMetadata(meta ObjectMeta) {
 }
 
 // Object is the minimal interface satisfied by every typed v1alpha1 envelope
-// (Agent, MCPServer, Skill, Prompt, Runtime, Deployment; extension kinds
+// (Agent, MCPServer, Skill, Hook, Prompt, Runtime, Deployment; extension kinds
 // opt in too). It lets generic code operate on any resource without
 // reflection.
 //
@@ -173,6 +173,52 @@ func (s *Skill) UnmarshalStatus(data json.RawMessage) error {
 		return err
 	}
 	s.Status.ResolvedSource = custom.ResolvedSource
+	return nil
+}
+
+func (h *Hook) GetMetadata() *ObjectMeta { return &h.Metadata }
+func (h *Hook) SetMetadata(meta ObjectMeta) {
+	h.Metadata = meta
+}
+func (h *Hook) MarshalSpec() (json.RawMessage, error) { return json.Marshal(h.Spec) }
+func (h *Hook) UnmarshalSpec(data json.RawMessage) error {
+	return json.Unmarshal(data, &h.Spec)
+}
+
+// MarshalStatus mirrors Skill.MarshalStatus: the embedded Status through the
+// storage codec with ResolvedSource spliced onto the same object, omitted when
+// nil so the store's patch-skip byte comparison stays stable.
+func (h *Hook) MarshalStatus() (json.RawMessage, error) {
+	base, err := MarshalStatusForStorage(h.Status.Status)
+	if err != nil {
+		return nil, err
+	}
+	m := map[string]json.RawMessage{}
+	if err := json.Unmarshal(base, &m); err != nil {
+		return nil, err
+	}
+	if h.Status.ResolvedSource != nil {
+		if m["resolvedSource"], err = json.Marshal(h.Status.ResolvedSource); err != nil {
+			return nil, err
+		}
+	}
+	return json.Marshal(m)
+}
+func (h *Hook) UnmarshalStatus(data json.RawMessage) error {
+	if len(data) == 0 {
+		h.Status = HookStatus{}
+		return nil
+	}
+	if err := UnmarshalStatusFromStorage(data, &h.Status.Status); err != nil {
+		return err
+	}
+	var custom struct {
+		ResolvedSource *HookResolvedSource `json:"resolvedSource"`
+	}
+	if err := json.Unmarshal(data, &custom); err != nil {
+		return err
+	}
+	h.Status.ResolvedSource = custom.ResolvedSource
 	return nil
 }
 
