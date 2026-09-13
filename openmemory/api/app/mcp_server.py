@@ -57,7 +57,12 @@ from app.utils.recency import rank_search_results
 from app.utils.reranking import apply_rerank
 from app.utils.token_usage_wrapper import usage_attribution
 from app.utils.write_guard import check_write_allowed
-from app.utils.write_queue import WriteJob, estimate_write_wait_sec, write_queue
+from app.utils.write_queue import (
+    WriteJob,
+    canonical_project_identifier,
+    estimate_write_wait_sec,
+    write_queue,
+)
 from fastapi import FastAPI, Request
 from fastapi.routing import APIRouter
 from mcp.server.fastmcp import FastMCP
@@ -177,6 +182,7 @@ async def _run_blocking(operation, *, timeout: float = MCP_BLOCKING_TIMEOUT_SEC)
 # a direct tool call may not — fall back to an explicit sentinel for attribution.
 DEFAULT_CLIENT_NAME = "unknown-client"
 
+
 # Create a router for MCP endpoints
 mcp_router = APIRouter(prefix="/mcp")
 
@@ -223,7 +229,9 @@ async def add_memories(
         )
         return blocked
 
-    project = project.strip()
+    project = canonical_project_identifier(project)
+    if not project:
+        return "Error: project could not be converted into a valid identifier"
     supersede_ids: list[str] = []
     if supersedes:
         for mid in supersedes:

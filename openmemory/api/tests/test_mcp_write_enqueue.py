@@ -183,6 +183,14 @@ class TestEnqueueAck:
         assert fake_queue.jobs[0].project == "alpha"
 
     @pytest.mark.asyncio
+    async def test_human_readable_project_is_canonicalized(self, fake_queue):
+        _set_ctx()
+        out = await add_memories("x", project="Herdeiro do Arcanjo")
+
+        assert json.loads(out)["status"] == "accepted"
+        assert fake_queue.jobs[0].project == "herdeiro-do-arcanjo"
+
+    @pytest.mark.asyncio
     async def test_missing_hostname_rejected(self, fake_queue):
         # No user_id in context -> attribution falls back to the sentinel; guard blocks.
         mcp_server.user_id_var.set("")
