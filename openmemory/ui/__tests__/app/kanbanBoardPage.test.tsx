@@ -50,4 +50,32 @@ describe("KanbanBoardPage deep-link", () => {
     expect(iframe.src).toContain("mem0_token=a.b.c");
     expect(iframe.src).toContain("embed=1");
   });
+
+  it("deep-link inválido mostra erro e botão para home", async () => {
+    mockedAxios.get.mockRejectedValue({
+      isAxiosError: true,
+      response: { status: 404, data: { detail: "Quadro Kanban não mapeado" } },
+    });
+
+    await act(async () => {
+      render(
+        <KanbanBoardPage
+          params={Promise.resolve({ boardId: "9999999999999999999" })}
+        />,
+      );
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-home-error")).toBeInTheDocument();
+      expect(screen.getByRole("alert")).toHaveTextContent(
+        "Quadro Kanban não mapeado",
+      );
+    });
+    expect(
+      screen.getByRole("button", { name: /ir para home do kanban/i }),
+    ).toBeInTheDocument();
+    expect(mockedAxios.get).not.toHaveBeenCalledWith(
+      "/api-proxy/api/v1/specs/kanban-home",
+    );
+  });
 });

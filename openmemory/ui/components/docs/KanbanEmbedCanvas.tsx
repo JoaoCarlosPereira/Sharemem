@@ -4,6 +4,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import axios from "axios";
 import { Button } from "@/components/ui/button";
 import { getApiUrl } from "@/lib/api-url";
+import {
+  formatKanbanLoadError,
+  isUnmappedBoardError,
+} from "@/lib/kanbanEmbed";
 import { useApiSessionReady } from "@/hooks/useApiSessionReady";
 
 export type KanbanEmbedInfo = {
@@ -115,7 +119,10 @@ export function KanbanEmbedCanvas({ boardId: propBoardId, reloadToken = 0 }: Pro
   }, []);
 
   const hardLoad = useCallback(
-    async (boardId: string | undefined) => {
+    async (
+      boardId: string | undefined,
+      options?: { allowStaleBoardFallback?: boolean },
+    ) => {
       if (!apiSessionReady) {
         setLoading(true);
         return;
@@ -141,21 +148,28 @@ export function KanbanEmbedCanvas({ boardId: propBoardId, reloadToken = 0 }: Pro
         syncShellPath(boardId);
         didInitialLoad.current = true;
       } catch (err: unknown) {
+        const canFallbackStaleBoard =
+          Boolean(boardId) &&
+          options?.allowStaleBoardFallback !== false &&
+          isUnmappedBoardError(err) &&
+          !propBoardId;
+        if (canFallbackStaleBoard) {
+          writeLastBoard(undefined);
+          syncShellPath(undefined);
+          setActiveBoardId(undefined);
+          setMountBoardId(undefined);
+          mountBoardRef.current = undefined;
+          await hardLoad(undefined, { allowStaleBoardFallback: false });
+          return;
+        }
         setIframeSrc(null);
         iframeSrcRef.current = null;
-        const detail = axios.isAxiosError(err)
-          ? err.response?.data?.detail?.detail ||
-            err.response?.data?.detail ||
-            err.message
-          : null;
-        setError(
-          (typeof detail === "string" && detail) || "Falha ao carregar Kanban",
-        );
+        setError(formatKanbanLoadError(err));
       } finally {
         setLoading(false);
       }
     },
-    [apiSessionReady, fetchEmbed],
+    [apiSessionReady, fetchEmbed, propBoardId],
   );
 
   // Carga inicial (uma vez) quando a sessão fica válida.
@@ -266,14 +280,26 @@ export function KanbanEmbedCanvas({ boardId: propBoardId, reloadToken = 0 }: Pro
         <p className="text-sm text-destructive" role="alert">
           {error}
         </p>
-        <Button
-          type="button"
-          size="sm"
-          variant="outline"
-          onClick={() => void hardLoad(activeBoardId)}
-        >
-          Tentar de novo
-        </Button>
+        <div className="flex flex-wrap items-center justify-center gap-2">
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            onClick={() => void hardLoad(activeBoardId)}
+          >
+            Tentar de novo
+          </Button>
+          {propBoardId ? (
+            <Button
+              type="button"
+              size="sm"
+              variant="secondary"
+              onClick={() => void hardLoad(undefined)}
+            >
+              Ir para home do Kanban
+            </Button>
+          ) : null}
+        </div>
       </div>
     );
   }

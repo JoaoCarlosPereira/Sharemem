@@ -46,6 +46,36 @@ describe("KanbanEmbedCanvas persistence", () => {
     expect(window.location.pathname).toBe("/docs/boards/1833672064557385241");
   });
 
+  it("cai para kanban-home quando o quadro salvo não está mais mapeado", async () => {
+    sessionStorage.setItem("mem0_kanban_last_board", "9999999999999999999");
+    mockedAxios.get
+      .mockRejectedValueOnce({
+        isAxiosError: true,
+        response: { status: 404, data: { detail: "Quadro Kanban não mapeado" } },
+      })
+      .mockResolvedValueOnce({
+        data: { embed_url: "/planka/", access_token: "home.jwt" },
+      });
+
+    render(<KanbanEmbedCanvas />);
+
+    await waitFor(() => {
+      expect(mockedAxios.get).toHaveBeenCalledWith(
+        "/api-proxy/api/v1/specs/kanban-boards/9999999999999999999",
+      );
+      expect(mockedAxios.get).toHaveBeenCalledWith(
+        "/api-proxy/api/v1/specs/kanban-home",
+      );
+    });
+    const iframe = (await screen.findByTestId(
+      "kanban-home-canvas",
+    )) as HTMLIFrameElement;
+    expect(iframe.src).toContain("home.jwt");
+    expect(sessionStorage.getItem("mem0_kanban_last_board")).toBeNull();
+    expect(window.location.pathname).toBe("/docs");
+    expect(screen.queryByTestId("kanban-home-error")).not.toBeInTheDocument();
+  });
+
   it("postMessage de path atualiza URL sem novo GET do embed", async () => {
     mockedAxios.get.mockResolvedValue({
       data: { embed_url: "/planka/", access_token: "a.b.c" },
