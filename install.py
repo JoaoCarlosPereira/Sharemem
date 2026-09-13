@@ -676,7 +676,10 @@ def ensure_update_ops_env(compose_env):
 
     Evita regressões vistas em produção: MinIO sem S3_* → 500 na aba Backup;
     PLANKA_PUBLIC_URL absoluto cross-origin → CSP no Kanban; mirror sem token;
-    PLANKA_BASE_URL relativo → crash do app PLANKA.
+    PLANKA_BASE_URL relativo → crash do app PLANKA; SOCKET_ALLOWED_ORIGINS
+    vazio → compose cai no default hardcoded (IP de outro host) e o
+    Socket.IO do PLANKA rejeita o origin real da LAN (board fica "carregando
+    para sempre", CORS bloqueado no console do navegador).
     """
     defaults = {
         "S3_ACCESS_KEY": "minioadmin",
@@ -701,6 +704,23 @@ def ensure_update_ops_env(compose_env):
         absolute = f"{nextauth}/planka" if nextauth else "https://memorias.sysmo.com.br/planka"
         set_env(compose_env, "PLANKA_BASE_URL", absolute)
         filled.append("PLANKA_BASE_URL")
+
+    if not (read_env(compose_env, "SOCKET_ALLOWED_ORIGINS") or "").strip():
+        origins = ["http://localhost:3000", "http://127.0.0.1:3000"]
+        ip = detect_lan_ip()
+        proxy_port = (read_env(compose_env, "PROXY_PORT") or "8765").strip()
+        if ip:
+            origins.append(f"http://{ip}:3000")
+            origins.append(f"http://{ip}:{proxy_port}")
+        for url in (read_env(compose_env, "NEXTAUTH_URL"), read_env(compose_env, "PLANKA_BASE_URL")):
+            url = (url or "").strip()
+            if url.startswith("http"):
+                parts = urlsplit(url)
+                origins.append(f"{parts.scheme}://{parts.netloc}")
+        seen = set()
+        origins = [o for o in origins if not (o in seen or seen.add(o))]
+        set_env(compose_env, "SOCKET_ALLOWED_ORIGINS", ",".join(origins))
+        filled.append("SOCKET_ALLOWED_ORIGINS")
 
     if filled:
         ok("Defaults de ops preenchidos (só chaves vazias): " + ", ".join(filled))

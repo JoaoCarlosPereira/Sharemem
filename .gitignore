@@ -8,6 +8,10 @@ __pycache__/
 server/history/
 server/.env
 
+# Runtime data dir for local OpenMemory installs (QDRANT_STORAGE target,
+# openmemory/.env) — never source, never commit.
+/memorias/
+
 # C extensions
 *.so
 

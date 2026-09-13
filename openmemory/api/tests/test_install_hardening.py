@@ -208,6 +208,45 @@ class TestEntrypointAndRequirements:
         assert "fastapi>=0.68.0,<0.140.5" in req
 
 
+class TestEnsureUpdateOpsEnvSocketOrigins:
+    """Regressão: SOCKET_ALLOWED_ORIGINS vazio caía no default hardcoded do
+    compose (IP de outro host) — Socket.IO do PLANKA rejeitava o origin real
+    da LAN e o board ficava "carregando para sempre" (CORS bloqueado)."""
+
+    def test_deriva_origins_do_ip_lan_e_planka_base_url(self, compose_env, monkeypatch):
+        monkeypatch.setattr(install, "detect_lan_ip", lambda: "192.168.2.118")
+        install.set_env(compose_env, "PROXY_PORT", "8765")
+        install.set_env(compose_env, "PLANKA_BASE_URL", "http://192.168.2.118:8765/planka")
+
+        install.ensure_update_ops_env(compose_env)
+
+        origins = (install.read_env(compose_env, "SOCKET_ALLOWED_ORIGINS") or "").split(",")
+        assert "http://localhost:3000" in origins
+        assert "http://127.0.0.1:3000" in origins
+        assert "http://192.168.2.118:3000" in origins
+        assert "http://192.168.2.118:8765" in origins
+
+    def test_inclui_origin_https_do_nextauth_url(self, compose_env, monkeypatch):
+        monkeypatch.setattr(install, "detect_lan_ip", lambda: None)
+        install.set_env(compose_env, "NEXTAUTH_URL", "https://memorias.sysmo.com.br")
+
+        install.ensure_update_ops_env(compose_env)
+
+        origins = (install.read_env(compose_env, "SOCKET_ALLOWED_ORIGINS") or "").split(",")
+        assert "https://memorias.sysmo.com.br" in origins
+
+    def test_nao_sobrescreve_valor_ja_configurado(self, compose_env, monkeypatch):
+        monkeypatch.setattr(install, "detect_lan_ip", lambda: "192.168.2.118")
+        install.set_env(compose_env, "SOCKET_ALLOWED_ORIGINS", "https://custom.example.com")
+
+        install.ensure_update_ops_env(compose_env)
+
+        assert (
+            install.read_env(compose_env, "SOCKET_ALLOWED_ORIGINS")
+            == "https://custom.example.com"
+        )
+
+
 class TestInstallerWiringHardening:
     def test_run_production_valida_ui_e_ollama(self):
         src = _INSTALL_PATH.read_text(encoding="utf-8")
