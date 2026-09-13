@@ -208,13 +208,22 @@ class AuthMiddleware:
             return
 
         request = Request(scope, receive=receive)
-        if self._mode == "off" or any(
-            request.url.path.startswith(p) for p in _SKIP_PREFIXES
-        ):
+        if any(request.url.path.startswith(p) for p in _SKIP_PREFIXES):
             await self.app(scope, receive, send)
             return
 
         path = request.url.path
+
+        if self._mode == "off":
+            # Bypass de credencial, mas a identidade ainda precisa cair em
+            # ``legacy`` nas contextvars — do contrário ``auth_method_var``
+            # fica com o default ("") e código downstream (ex.: emissão do
+            # token do Kanban/PLANKA em ``specs.py``) não reconhece o modo
+            # compartilhado, resolve grupo == None e responde 403 "Usuário
+            # sem grupo associado" mesmo com AUTH_MODE=off.
+            ctx = AuthContext(method="legacy", machine_hostname=_mcp_hostname(path))
+            await self._call_with_context(scope, receive, send, ctx)
+            return
 
         # 1) ?token= nas rotas MCP — credencial explícita de agente (ADR-003).
         query_token = (
