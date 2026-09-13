@@ -101,7 +101,7 @@ module.exports = function defineMem0AuthHook(sails) {
       }
     } else if (existingBm) {
       // Revoke membership left over from the old all-shared behavior.
-      await BoardMembership.qm.destroyOne(existingBm.id);
+      await BoardMembership.qm.deleteOne(existingBm.id);
     }
   };
 
@@ -124,7 +124,7 @@ module.exports = function defineMem0AuthHook(sails) {
       // Remove project-manager grants from the old all-shared behavior (shared
       // projects can span multiple groups; board memberships are the only path).
       const projectManagers = (await ProjectManager.qm.getByUserId(user.id)) || [];
-      await Promise.all(projectManagers.map((pm) => ProjectManager.qm.destroyOne(pm.id)));
+      await Promise.all(projectManagers.map((pm) => ProjectManager.qm.deleteOne(pm.id)));
 
       // eslint-disable-next-line no-restricted-syntax
       for (const project of projects) {

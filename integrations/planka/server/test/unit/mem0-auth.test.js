@@ -14,6 +14,7 @@ const {
   authenticateMem0Request,
   authenticateOmtk,
 } = require('../../api/hooks/mem0-auth/lib/validate-auth');
+const defineMem0AuthHook = require('../../api/hooks/mem0-auth');
 
 const SECRET = 'unit-test-secret-value-32bytes!!';
 
@@ -216,5 +217,171 @@ describe('mem0-auth validate-auth', () => {
     const r = await authenticateOmtk('omtk_x', db);
     assert.strictEqual(r.ok, false);
     assert.strictEqual(r.reason, 'omtk_invalid');
+  });
+});
+
+/**
+ * Regression: `ensureSharedAccess` (mem0-auth/index.js) called
+ * `ProjectManager.qm.destroyOne` / `BoardMembership.qm.destroyOne`, methods
+ * that don't exist on the query-methods hooks (only `deleteOne` is exported).
+ * Every JWT embed request threw a TypeError, was swallowed by the outer
+ * try/catch (only `err.message` logged, so the failure was invisible), and
+ * no BoardMembership row was ever created — the PLANKA board never finished
+ * loading for the mem0 embed user (kanban "loading forever" bug).
+ */
+describe('mem0-auth ensureSharedAccess (hook, mocked Waterline globals)', () => {
+  const makeSails = () => ({
+    log: { info() {}, warn() {} },
+    async sendNativeQuery() {
+      return { rows: [] };
+    },
+    helpers: {
+      mem0: {
+        upsertUserByEmail: {
+          async with({ email }) {
+            return { id: 'user-1', email, language: null };
+          },
+        },
+      },
+    },
+  });
+
+  const withGlobals = (globals, fn) => {
+    const previous = {};
+    for (const key of Object.keys(globals)) {
+      previous[key] = global[key];
+      global[key] = globals[key];
+    }
+    const restore = () => {
+      for (const key of Object.keys(globals)) {
+        global[key] = previous[key];
+      }
+    };
+    return Promise.resolve()
+      .then(fn)
+      .then(
+        (value) => {
+          restore();
+          return value;
+        },
+        (err) => {
+          restore();
+          throw err;
+        },
+      );
+  };
+
+  const embedToken = (extra = {}) =>
+    jwt.sign(
+      { sub: 'ui-user', email: 'ui-user@mem0.local', mem0: true, ...extra },
+      SECRET,
+      { algorithm: 'HS256' },
+    );
+
+  const runAuthMiddleware = async (sails, token) => {
+    const hook = defineMem0AuthHook(sails);
+    const fn = hook.routes.before['/api/*'].fn;
+    let nextCalled = false;
+    const req = { headers: { authorization: `Bearer ${token}` }, path: '/api/projects' };
+    const res = {
+      status() {
+        return this;
+      },
+      json() {
+        return this;
+      },
+    };
+    await fn(req, res, () => {
+      nextCalled = true;
+    });
+    return { req, nextCalled };
+  };
+
+  it('grants shared "*" access via deleteOne/createOne without throwing', async () => {
+    const priorEnv = process.env.AUTH_JWT_SECRET;
+    process.env.AUTH_JWT_SECRET = SECRET;
+
+    const deletedProjectManagerIds = [];
+    const createdBoardMemberships = [];
+    const warnings = [];
+
+    const sails = makeSails();
+    sails.log.warn = (...args) => warnings.push(args);
+
+    try {
+      await withGlobals(
+        {
+          User: { qm: {} },
+          Project: { qm: { async getShared() { return [{ id: 'p1' }]; } } },
+          ProjectManager: {
+            qm: {
+              async getByUserId() { return [{ id: 'pm-stale' }]; },
+              async deleteOne(id) { deletedProjectManagerIds.push(id); },
+            },
+          },
+          Board: { qm: { async getByProjectIds() { return [{ id: 'b1' }]; } } },
+          BoardMembership: {
+            Roles: { EDITOR: 'editor' },
+            qm: {
+              async getOneByBoardIdAndUserId() { return null; },
+              async createOne(values) { createdBoardMemberships.push(values); },
+            },
+          },
+        },
+        () => runAuthMiddleware(sails, embedToken({ group: '*' })),
+      );
+    } finally {
+      process.env.AUTH_JWT_SECRET = priorEnv;
+    }
+
+    assert.deepStrictEqual(warnings, [], 'ensureSharedAccess must not throw/warn');
+    assert.deepStrictEqual(deletedProjectManagerIds, ['pm-stale']);
+    assert.strictEqual(createdBoardMemberships.length, 1);
+    assert.strictEqual(createdBoardMemberships[0].boardId, 'b1');
+  });
+
+  it('revokes a stale membership via deleteOne when the board moved to another group', async () => {
+    const priorEnv = process.env.AUTH_JWT_SECRET;
+    process.env.AUTH_JWT_SECRET = SECRET;
+
+    const deletedBoardMembershipIds = [];
+    const warnings = [];
+
+    const sails = makeSails();
+    sails.log.warn = (...args) => warnings.push(args);
+
+    try {
+      await withGlobals(
+        {
+          User: { qm: {} },
+          Project: { qm: { async getShared() { return [{ id: 'p1' }]; } } },
+          ProjectManager: {
+            qm: {
+              async getByUserId() { return []; },
+              async deleteOne() {},
+            },
+          },
+          Board: { qm: { async getByProjectIds() { return [{ id: 'b1' }]; } } },
+          BoardMembership: {
+            Roles: { EDITOR: 'editor' },
+            qm: {
+              async getOneByBoardIdAndUserId() {
+                return { id: 'bm-old', role: 'editor' };
+              },
+              async deleteOne(id) { deletedBoardMembershipIds.push(id); },
+            },
+          },
+        },
+        // group "group-b" != the board's actual group ("group-a" from
+        // get-board-group-ids, empty here since spec_planka_id_map isn't
+        // mocked) — mismatched group hits the revoke branch.
+        () => runAuthMiddleware(sails, embedToken({ group: 'group-b' })),
+      );
+    } finally {
+      process.env.AUTH_JWT_SECRET = priorEnv;
+    }
+
+    assert.deepStrictEqual(warnings, [], 'ensureSharedAccess must not throw/warn');
+    assert.deepStrictEqual(deletedBoardMembershipIds, ['bm-old']);
   });
 });
