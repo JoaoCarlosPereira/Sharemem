@@ -48,6 +48,7 @@ from app.workers.write_worker import embedded_worker_enabled, write_worker
 from app.utils.logging_context import install_structured_logging
 from app.utils.tracing import configure_tracing
 from app.utils.deletion_guard import deletion_guard_status, log_deletion_guard_startup
+from app.utils.prometheus_multiproc import mark_current_process_dead
 from app.utils.write_guard import log_write_guard_startup
 from app.utils.write_queue_stall import write_queue_stall_watchdog
 from fastapi import FastAPI
@@ -230,3 +231,8 @@ async def _stop_write_worker():
     await spec_task_timeout_worker.stop()
     await spec_workspace_archive_worker.stop()
     await write_queue_stall_watchdog.stop()
+    # Modo multiprocesso Prometheus: remove os Gauges live* deste PID assim que
+    # o worker do uvicorn encerra o app (o atexit registrado em
+    # app.utils.metrics cobre os demais processos; chamar duas vezes é
+    # idempotente). No-op sem PROMETHEUS_MULTIPROC_DIR.
+    mark_current_process_dead()

@@ -213,6 +213,17 @@ services:
       timeout: 5s
       retries: 3
       start_period: 90s
+    # Prometheus em modo multiprocesso (docs/runbooks/prometheus-metrics.md):
+    # /metrics agrega os arquivos de todos os processos Python deste container
+    # (alembic, workers do uvicorn, worker embutido). Diretório próprio em
+    # tmpfs — não é volume nomeado, não persiste entre recriações e não é
+    # compartilhado com outros serviços; o entrypoint da imagem o limpa antes
+    # de iniciar qualquer processo Python.
+    environment:
+      <<: *api-env
+      PROMETHEUS_MULTIPROC_DIR: /tmp/prometheus-multiproc
+    tmpfs:
+      - /tmp/prometheus-multiproc:size=64m
     command: >
       sh -c "alembic upgrade head && exec uvicorn main:app --host 0.0.0.0 --port 8765 --workers 1 --no-access-log"
 
