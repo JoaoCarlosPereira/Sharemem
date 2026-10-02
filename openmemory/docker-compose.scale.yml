@@ -334,8 +334,11 @@ services:
       # (não passam pelo sed de NEXT_PUBLIC_* do entrypoint): defina no .env.
       # NEXTAUTH_URL deve ser a URL da UI acessível na LAN (ex.: http://IP:3000).
       # ADMIN_TOKEN: só no container (nunca NEXT_PUBLIC_*). O /api-proxy injeta
-      # X-Admin-Token em mutações /admin/* quando a UI está em modo legado sem
-      # sessão Google — senão Backup/Restore/etc. falham com 401.
+      # X-Admin-Token em mutações /admin/* e em /api/v1/config/* (todos os
+      # métodos) SÓ em UI legado (AUTH_UI_REQUIRED=0) — senão Backup/Restore/
+      # Configurações falham com 401. Com login Google, usa o Bearer da sessão.
+      # Em legado, quem alcança a porta 3000 ganha esse acesso: em produção use
+      # AUTH_UI_REQUIRED=1 (ver docs/runbooks/auth-secrets.md).
       - ADMIN_TOKEN=${ADMIN_TOKEN:-}
       - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}
       - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET:-}

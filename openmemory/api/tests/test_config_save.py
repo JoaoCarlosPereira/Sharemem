@@ -34,6 +34,16 @@ def factory():
     engine.dispose()
 
 
+ADMIN = "test-admin-token"
+
+
+@pytest.fixture(autouse=True)
+def _admin_env(monkeypatch):
+    # /api/v1/config exige admin (require_admin); os testes de persistência
+    # enviam X-Admin-Token. Proteção coberta em test_config_auth.py.
+    monkeypatch.setenv("ADMIN_TOKEN", ADMIN)
+
+
 def make_client(factory):
     app = FastAPI()
     app.include_router(_config.router)
@@ -46,7 +56,7 @@ def make_client(factory):
             s.close()
 
     app.dependency_overrides[get_db] = _override
-    return TestClient(app)
+    return TestClient(app, headers={"X-Admin-Token": ADMIN})
 
 
 def test_put_config_persists_openai_base_url(factory, monkeypatch):

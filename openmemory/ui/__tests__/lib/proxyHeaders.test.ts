@@ -5,6 +5,8 @@
 import {
   HOP_BY_HOP_HEADERS,
   applyLegacyAdminToken,
+  buildUpstreamTarget,
+  isUnsafePathSegment,
   rewriteUpstreamRedirectLocation,
   sanitizeUpstreamHeaders,
 } from "@/lib/proxy-headers";
@@ -56,6 +58,7 @@ describe("applyLegacyAdminToken", () => {
       method: "POST",
       pathSegments: ["admin", "backup", "run"],
       adminToken: token,
+      legacyUi: true,
     });
     expect(out.get("x-admin-token")).toBe(token);
   });
@@ -65,6 +68,7 @@ describe("applyLegacyAdminToken", () => {
       method: "GET",
       pathSegments: ["admin", "backup", "status"],
       adminToken: token,
+      legacyUi: true,
     });
     expect(out.has("x-admin-token")).toBe(false);
   });
@@ -75,6 +79,7 @@ describe("applyLegacyAdminToken", () => {
       method: "POST",
       pathSegments: ["admin", "backup", "run"],
       adminToken: token,
+      legacyUi: true,
     });
     expect(out.has("x-admin-token")).toBe(false);
     expect(out.get("authorization")).toBe("Bearer jwt-session");
@@ -86,6 +91,7 @@ describe("applyLegacyAdminToken", () => {
       method: "POST",
       pathSegments: ["admin", "backup", "restore"],
       adminToken: token,
+      legacyUi: true,
     });
     expect(out.get("x-admin-token")).toBe(token);
     // o shim não é credencial: é removido, não vira Bearer no upstream
@@ -98,6 +104,7 @@ describe("applyLegacyAdminToken", () => {
       method: "POST",
       pathSegments: ["api", "v1", "memories"],
       adminToken: token,
+      legacyUi: true,
     });
     expect(out.has("x-admin-token")).toBe(false);
     expect(out.get("authorization")).toBe("Bearer local");
@@ -109,6 +116,7 @@ describe("applyLegacyAdminToken", () => {
       method: "PUT",
       pathSegments: ["admin", "backup", "policy"],
       adminToken: token,
+      legacyUi: true,
     });
     expect(out.get("x-admin-token")).toBe("explicit");
   });
@@ -118,8 +126,102 @@ describe("applyLegacyAdminToken", () => {
       method: "POST",
       pathSegments: ["api", "v1", "memories"],
       adminToken: token,
+      legacyUi: true,
     });
     expect(out.has("x-admin-token")).toBe(false);
+  });
+
+  it("modo Google (UI exige login): mutação /admin/* anônima NÃO recebe token", () => {
+    for (const headers of [new Headers(), new Headers({ authorization: "Bearer local" })]) {
+      const out = applyLegacyAdminToken(headers, {
+        method: "POST",
+        pathSegments: ["admin", "backup", "restore"],
+        adminToken: token,
+        legacyUi: false,
+      });
+      expect(out.has("x-admin-token")).toBe(false);
+    }
+  });
+
+  describe("/api/v1/config (admin em todos os métodos)", () => {
+    it.each(["GET", "PUT", "PATCH", "POST"])(
+      "injeta X-Admin-Token em %s /api/v1/config/* sem credencial (UI legado)",
+      (method) => {
+        const out = applyLegacyAdminToken(new Headers(), {
+          method,
+          pathSegments: ["api", "v1", "config", "mem0", "llm"],
+          adminToken: token,
+          legacyUi: true,
+        });
+        expect(out.get("x-admin-token")).toBe(token);
+      },
+    );
+
+    it("injeta no GET da raiz /api/v1/config e troca o shim Bearer local", () => {
+      const out = applyLegacyAdminToken(
+        new Headers({ authorization: "Bearer local" }),
+        {
+          method: "GET",
+          pathSegments: ["api", "v1", "config"],
+          adminToken: token,
+          legacyUi: true,
+        },
+      );
+      expect(out.get("x-admin-token")).toBe(token);
+      expect(out.has("authorization")).toBe(false);
+    });
+
+    it("não injeta quando há sessão JWT real", () => {
+      const out = applyLegacyAdminToken(
+        new Headers({ authorization: "Bearer jwt-session" }),
+        {
+          method: "GET",
+          pathSegments: ["api", "v1", "config"],
+          adminToken: token,
+          legacyUi: true,
+        },
+      );
+      expect(out.has("x-admin-token")).toBe(false);
+      expect(out.get("authorization")).toBe("Bearer jwt-session");
+    });
+
+    it("não injeta em config quando a UI exige login Google (fail-closed)", () => {
+      const out = applyLegacyAdminToken(new Headers(), {
+        method: "GET",
+        pathSegments: ["api", "v1", "config"],
+        adminToken: token,
+        legacyUi: false,
+      });
+      expect(out.has("x-admin-token")).toBe(false);
+    });
+
+    it("não amplia para caminhos vizinhos (configs, outros /api/v1, GET /admin)", () => {
+      for (const [method, pathSegments] of [
+        ["GET", ["api", "v1", "configs"]],
+        ["GET", ["api", "v1", "config-foo"]],
+        ["GET", ["api", "v1", "memories"]],
+        ["GET", ["api", "v2", "config"]],
+        ["GET", ["admin", "backup", "status"]],
+      ] as const) {
+        const out = applyLegacyAdminToken(new Headers(), {
+          method,
+          pathSegments: [...pathSegments],
+          adminToken: token,
+          legacyUi: true,
+        });
+        expect(out.has("x-admin-token")).toBe(false);
+      }
+    });
+
+    it("sem ADMIN_TOKEN configurado não injeta nada", () => {
+      const out = applyLegacyAdminToken(new Headers(), {
+        method: "GET",
+        pathSegments: ["api", "v1", "config"],
+        adminToken: "",
+        legacyUi: true,
+      });
+      expect(out.has("x-admin-token")).toBe(false);
+    });
   });
 });
 
@@ -144,5 +246,70 @@ describe("rewriteUpstreamRedirectLocation", () => {
   it("mantém Location externa inalterada", () => {
     const external = "https://accounts.google.com/o/oauth2/v2/auth";
     expect(rewriteUpstreamRedirectLocation(external, internal)).toBe(external);
+  });
+});
+
+describe("buildUpstreamTarget (anti path traversal)", () => {
+  const base = "http://openmemory-mcp:8765";
+
+  it("monta a URL e devolve os segmentos do pathname final", () => {
+    expect(buildUpstreamTarget(base, ["api", "v1", "config"], "?a=1")).toEqual({
+      url: `${base}/api/v1/config?a=1`,
+      pathSegments: ["api", "v1", "config"],
+    });
+  });
+
+  it.each([
+    [["admin", "../../api/v1/config"]],
+    [["api", "v1", "config", "..", "..", "..", "admin"]],
+    [["api", "v1", "config", "."]],
+    [["admin", "..\\api"]],
+    [["admin", "%2e%2e"]],
+    [["admin", "a\u0000b"]],
+    [["admin", ""]],
+    [["admin", "a/../b"]],
+    [["admin", "a//b"]],
+    [["admin", "/a"]],
+    [["admin", "a\\..\\b"]],
+    [["admin", "a%2F..%2Fb"]],
+  ])("rejeita %j", (segments) => {
+    expect(buildUpstreamTarget(base, segments, "")).toBeNull();
+  });
+
+  it("isUnsafePathSegment aceita segmentos comuns", () => {
+    for (const s of [
+      "api",
+      "v1",
+      "meu projeto",
+      "a.b",
+      "...",
+      "a?b",
+      "user@x",
+      "team/new-skill",
+      "50%off",
+      "100%",
+      "a%zz",
+    ]) {
+      expect(isUnsafePathSegment(s)).toBe(false);
+    }
+  });
+
+  it("segmento com '/' é achatado no path final (visão da API)", () => {
+    expect(
+      buildUpstreamTarget(
+        base,
+        ["api", "v1", "store", "skills", "team/new-skill", "latest"],
+        "",
+      ),
+    ).toEqual({
+      url: `${base}/api/v1/store/skills/team/new-skill/latest`,
+      pathSegments: ["api", "v1", "store", "skills", "team", "new-skill", "latest"],
+    });
+  });
+
+  it("'%' literal vira %25 (sem dupla decodificação)", () => {
+    expect(
+      buildUpstreamTarget(base, ["admin", "projects", "50%off"], "")?.url,
+    ).toBe(`${base}/admin/projects/50%25off`);
   });
 });

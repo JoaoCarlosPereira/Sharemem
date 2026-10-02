@@ -1,18 +1,75 @@
-from typing import Any, Dict, Optional
-
+import copy
+import json
 import logging
+from typing import Any, Dict, Optional
 
 from app.database import get_db
 from app.models import Config as ConfigModel
 from app.models import get_current_utc_time
+from app.utils.admin_auth import require_admin
 from app.utils.memory import reset_memory_client
-from fastapi import APIRouter, Depends, HTTPException
+from app.utils.secret_mask import (
+    MaskedSecretError,
+    assert_no_masked_secrets,
+    mask_config_secrets,
+    restore_masked_secrets,
+)
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi.responses import JSONResponse
+from fastapi.routing import APIRoute
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/v1/config", tags=["config"])
+# Toda a superfície de config exige admin (ADMIN_TOKEN ou sessão JWT, ver
+# ``require_admin``): a config contém a ``api_key`` do LLM e o ``openai_base_url``
+# — leitura vaza segredo, escrita permite repontar o LLM para um servidor
+# arbitrário. A dependência fica no APIRouter (não por rota) para ser
+# fail-closed: qualquer rota nova adicionada aqui herda a proteção.
+
+
+class SecretMaskingRoute(APIRoute):
+    """Rota que mascara segredos em TODA resposta JSON do router.
+
+    Centraliza o mascaramento (não depende de cada handler lembrar de chamar
+    ``mask_config_secrets``): rotas novas neste router herdam automaticamente.
+    Erros levantados como ``HTTPException`` são serializados fora deste wrapper
+    (exception handlers do app) — não ponha segredos em ``detail``.
+    """
+
+    def get_route_handler(self):
+        original = super().get_route_handler()
+
+        async def handler(request: Request) -> Response:
+            response = await original(request)
+            media_type = (response.headers.get("content-type") or "").split(";")[0].strip()
+            if media_type != "application/json" or not getattr(response, "body", None):
+                return response
+            try:
+                payload = json.loads(response.body)
+            except ValueError:
+                return response
+            masked = mask_config_secrets(payload)
+            if masked == payload:
+                return response
+            headers = {k: v for k, v in response.headers.items() if k.lower() != "content-length"}
+            return JSONResponse(
+                content=masked,
+                status_code=response.status_code,
+                headers=headers,
+                background=response.background,
+            )
+
+        return handler
+
+
+router = APIRouter(
+    prefix="/api/v1/config",
+    tags=["config"],
+    dependencies=[Depends(require_admin)],
+    route_class=SecretMaskingRoute,
+)
 
 class LLMConfig(BaseModel):
     model: str = Field(..., description="LLM model name")
@@ -141,7 +198,19 @@ def get_config_from_db(db: Session, key: str = "main"):
     return config_value
 
 def save_config_to_db(db: Session, config: Dict[str, Any], key: str = "main"):
-    """Save configuration to database."""
+    """Save configuration to database.
+
+    Garantia absoluta: se sobrou máscara (``****…``) em qualquer posição que
+    ``mask_config_secrets`` mascararia (chave sensível, URL com credencial), a
+    escrita é rejeitada com 422 — a máscara devolvida pelo GET nunca vira o
+    segredo persistido. Texto livre (ex.: ``custom_instructions``) começando
+    com ``****`` não bloqueia (ver ``find_masked_values``).
+    """
+    try:
+        assert_no_masked_secrets(config)
+    except MaskedSecretError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
     db_config = db.query(ConfigModel).filter(ConfigModel.key == key).first()
 
     if db_config:
@@ -156,12 +225,30 @@ def save_config_to_db(db: Session, config: Dict[str, Any], key: str = "main"):
     return db_config.value
 
 
+def _replace_mem0_section(db: Session, section: str, payload: BaseModel) -> Dict[str, Any]:
+    """Substitui ``mem0.<section>`` (llm/embedder/vector_store) e persiste.
+
+    Segredo mascarado vindo do GET mantém o valor real já persistido.
+    """
+    current_config = copy.deepcopy(get_config_from_db(db))
+    if not isinstance(current_config.get("mem0"), dict):
+        current_config["mem0"] = {}
+    new_section = _model_dump(payload, exclude_none=True)
+    restore_masked_secrets(new_section, current_config["mem0"].get(section))
+    current_config["mem0"][section] = new_section
+    save_config_to_db(db, current_config)
+    reset_memory_client()
+    return new_section
+
+
+# Respostas: o mascaramento é feito por ``SecretMaskingRoute`` (todas as rotas).
+
+
 @router.get("", response_model=ConfigSchema)
 @router.get("/", response_model=ConfigSchema)
 async def get_configuration(db: Session = Depends(get_db)):
-    """Get the current configuration."""
-    config = get_config_from_db(db)
-    return config
+    """Get the current configuration (secrets masked)."""
+    return get_config_from_db(db)
 
 
 @router.put("", response_model=ConfigSchema)
@@ -170,17 +257,20 @@ async def update_configuration(config: ConfigSchema, db: Session = Depends(get_d
     """Update the configuration."""
     try:
         current_config = get_config_from_db(db)
-
-        updated_config = current_config.copy()
+        # Cópia profunda: além de preservar o snapshot para restaurar segredos
+        # mascarados, garante que o SQLAlchemy veja um JSON novo ao salvar.
+        updated_config = copy.deepcopy(current_config)
 
         if config.openmemory is not None:
-            if "openmemory" not in updated_config:
+            if not isinstance(updated_config.get("openmemory"), dict):
                 updated_config["openmemory"] = {}
             updated_config["openmemory"].update(_model_dump(config.openmemory, exclude_none=True))
 
         if config.mem0 is not None:
             mem0_update = _model_dump(config.mem0, exclude_none=True)
-            if "mem0" not in updated_config:
+            # GET devolve segredos mascarados: a máscara nunca sobrescreve o real.
+            restore_masked_secrets(mem0_update, current_config.get("mem0"))
+            if not isinstance(updated_config.get("mem0"), dict):
                 updated_config["mem0"] = {}
             # Merge section-by-section so UI saves (llm/embedder only) keep vector_store.
             for key, value in mem0_update.items():
@@ -203,7 +293,7 @@ async def update_configuration(config: ConfigSchema, db: Session = Depends(get_d
 @router.patch("/", response_model=ConfigSchema)
 async def patch_configuration(config_update: ConfigSchema, db: Session = Depends(get_db)):
     """Update parts of the configuration."""
-    current_config = get_config_from_db(db)
+    current_config = copy.deepcopy(get_config_from_db(db))
 
     def deep_update(source, overrides):
         for key, value in overrides.items():
@@ -214,6 +304,8 @@ async def patch_configuration(config_update: ConfigSchema, db: Session = Depends
         return source
 
     update_data = _model_dump(config_update, exclude_unset=True)
+    # Antes do merge: máscara vinda do GET mantém o segredo persistido.
+    restore_masked_secrets(update_data, current_config)
     updated_config = deep_update(current_config, update_data)
 
     save_config_to_db(db, updated_config)
@@ -225,111 +317,68 @@ async def patch_configuration(config_update: ConfigSchema, db: Session = Depends
 async def reset_configuration(db: Session = Depends(get_db)):
     """Reset the configuration to default values."""
     try:
-        # Get the default configuration with proper provider setups
         default_config = get_default_configuration()
-        
-        # Save it as the current configuration in the database
         save_config_to_db(db, default_config)
         reset_memory_client()
         return default_config
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(
-            status_code=500, 
+            status_code=500,
             detail=f"Failed to reset configuration: {str(e)}"
         )
+
 
 @router.get("/mem0/llm", response_model=LLMProvider)
 async def get_llm_configuration(db: Session = Depends(get_db)):
     """Get only the LLM configuration."""
-    config = get_config_from_db(db)
-    llm_config = config.get("mem0", {}).get("llm", {})
-    return llm_config
+    return get_config_from_db(db).get("mem0", {}).get("llm", {})
+
 
 @router.put("/mem0/llm", response_model=LLMProvider)
 async def update_llm_configuration(llm_config: LLMProvider, db: Session = Depends(get_db)):
     """Update only the LLM configuration."""
-    current_config = get_config_from_db(db)
-    
-    # Ensure mem0 key exists
-    if "mem0" not in current_config:
-        current_config["mem0"] = {}
-    
-    # Update the LLM configuration
-    current_config["mem0"]["llm"] = _model_dump(llm_config, exclude_none=True)
-    
-    # Save the configuration to database
-    save_config_to_db(db, current_config)
-    reset_memory_client()
-    return current_config["mem0"]["llm"]
+    return _replace_mem0_section(db, "llm", llm_config)
+
 
 @router.get("/mem0/embedder", response_model=EmbedderProvider)
 async def get_embedder_configuration(db: Session = Depends(get_db)):
     """Get only the Embedder configuration."""
-    config = get_config_from_db(db)
-    embedder_config = config.get("mem0", {}).get("embedder", {})
-    return embedder_config
+    return get_config_from_db(db).get("mem0", {}).get("embedder", {})
+
 
 @router.put("/mem0/embedder", response_model=EmbedderProvider)
 async def update_embedder_configuration(embedder_config: EmbedderProvider, db: Session = Depends(get_db)):
     """Update only the Embedder configuration."""
-    current_config = get_config_from_db(db)
-    
-    # Ensure mem0 key exists
-    if "mem0" not in current_config:
-        current_config["mem0"] = {}
-    
-    # Update the Embedder configuration
-    current_config["mem0"]["embedder"] = _model_dump(embedder_config, exclude_none=True)
-    
-    # Save the configuration to database
-    save_config_to_db(db, current_config)
-    reset_memory_client()
-    return current_config["mem0"]["embedder"]
+    return _replace_mem0_section(db, "embedder", embedder_config)
+
 
 @router.get("/mem0/vector_store", response_model=Optional[VectorStoreProvider])
 async def get_vector_store_configuration(db: Session = Depends(get_db)):
     """Get only the Vector Store configuration."""
-    config = get_config_from_db(db)
-    vector_store_config = config.get("mem0", {}).get("vector_store", None)
-    return vector_store_config
+    return get_config_from_db(db).get("mem0", {}).get("vector_store", None)
+
 
 @router.put("/mem0/vector_store", response_model=VectorStoreProvider)
 async def update_vector_store_configuration(vector_store_config: VectorStoreProvider, db: Session = Depends(get_db)):
     """Update only the Vector Store configuration."""
-    current_config = get_config_from_db(db)
-    
-    # Ensure mem0 key exists
-    if "mem0" not in current_config:
-        current_config["mem0"] = {}
-    
-    # Update the Vector Store configuration
-    current_config["mem0"]["vector_store"] = _model_dump(vector_store_config, exclude_none=True)
-    
-    # Save the configuration to database
-    save_config_to_db(db, current_config)
-    reset_memory_client()
-    return current_config["mem0"]["vector_store"]
+    return _replace_mem0_section(db, "vector_store", vector_store_config)
+
 
 @router.get("/openmemory", response_model=OpenMemoryConfig)
 async def get_openmemory_configuration(db: Session = Depends(get_db)):
     """Get only the OpenMemory configuration."""
-    config = get_config_from_db(db)
-    openmemory_config = config.get("openmemory", {})
-    return openmemory_config
+    return get_config_from_db(db).get("openmemory", {})
+
 
 @router.put("/openmemory", response_model=OpenMemoryConfig)
 async def update_openmemory_configuration(openmemory_config: OpenMemoryConfig, db: Session = Depends(get_db)):
     """Update only the OpenMemory configuration."""
-    current_config = get_config_from_db(db)
-    
-    # Ensure openmemory key exists
-    if "openmemory" not in current_config:
+    current_config = copy.deepcopy(get_config_from_db(db))
+    if not isinstance(current_config.get("openmemory"), dict):
         current_config["openmemory"] = {}
-    
-    # Update the OpenMemory configuration
     current_config["openmemory"].update(_model_dump(openmemory_config, exclude_none=True))
-    
-    # Save the configuration to database
     save_config_to_db(db, current_config)
     reset_memory_client()
     return current_config["openmemory"]
