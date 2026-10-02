@@ -1697,6 +1697,19 @@ async def claim_task(task_id: str) -> str:
                         ),
                         default=str,
                     )
+                if result.archived:
+                    return json.dumps(
+                        {
+                            "claimed": False,
+                            "archived": True,
+                            "current_assignee": result.current_assignee,
+                            "version": result.version,
+                            "message": (
+                                "Card arquivado — está fora do fluxo. Para retomá-lo, "
+                                "chame unarchive_task(task_id, expected_version) antes."
+                            ),
+                        }
+                    )
                 return json.dumps(
                     {
                         "claimed": False,
@@ -1725,6 +1738,7 @@ async def release_task(task_id: str) -> str:
             from app.models import TaskCard
             from app.routers.specs import _assert_access
             from app.utils.kanban_pipeline import enrich_status_payload
+            from app.utils.task_lock import TaskStatusPolicyError
             from app.utils.task_lock import release_task as _release_task
         
             actor = resolve_hostname(user_id_var.get(None))
@@ -1738,7 +1752,12 @@ async def release_task(task_id: str) -> str:
                     _assert_access(db, task.workspace_id)
                 except HTTPException as he:
                     return f"Error: {he.detail}"
-                result = _release_task(db, tid, actor, reason="release via MCP")
+                try:
+                    result = _release_task(db, tid, actor, reason="release via MCP")
+                except TaskStatusPolicyError as exc:
+                    return json.dumps(
+                        {"policy": True, "code": exc.code, "message": exc.message}
+                    )
                 return json.dumps(
                     enrich_status_payload(
                         {"released": True, "version": result.version, "status": "tasks"},
@@ -1942,11 +1961,12 @@ async def get_task(task_id: str) -> str:
         return f"Error: {e}"
 
 
-@mcp.tool(description="List the task cards of a spec workspace, optionally filtered by Kanban column (tasks/em_andamento/revisao_codigo/fase_teste/concluido). This is how you go from a workspace to a claimable task_id without copying it from the web UI. Each item carries `version`, which update_task_status requires as expected_version — no extra read needed. Pass include_description=true to also get each card's body. Returns a JSON list; empty when there are none (never an error).")
+@mcp.tool(description="List the task cards of a spec workspace, optionally filtered by Kanban column (tasks/em_andamento/revisao_codigo/fase_teste/concluido). This is how you go from a workspace to a claimable task_id without copying it from the web UI. Each item carries `version`, which update_task_status requires as expected_version — no extra read needed. Pass include_description=true to also get each card's body. Archived cards (see archive_task) are hidden by default; pass include_archived=true to list them too (they carry archived_at). Returns a JSON list; empty when there are none (never an error).")
 async def list_tasks(
     workspace_id: str,
     status: str | None = None,
     include_description: bool = False,
+    include_archived: bool = False,
 ) -> str:
     try:
         def _sync_op():
@@ -1971,7 +1991,10 @@ async def list_tasks(
                         )
                 try:
                     tasks = _list_tasks_endpoint(
-                        uuid.UUID(workspace_id), status=status_enum, db=db
+                        uuid.UUID(workspace_id),
+                        status=status_enum,
+                        include_archived=include_archived,
+                        db=db,
                     )
                 except HTTPException as he:
                     return f"Error: {he.detail}"
@@ -2113,6 +2136,78 @@ async def delete_task(task_id: str) -> str:
     except Exception as e:  # noqa: BLE001
         logging.exception(e)
         return f"Error: {e}"
+
+
+async def _set_task_archived(
+    task_id: str, expected_version: int, *, archive: bool, reason: str | None = None
+) -> str:
+    try:
+        def _sync_op():
+            from fastapi import HTTPException
+
+            from app.models import TaskCard
+            from app.routers.specs import _assert_access
+            from app.utils.task_lock import TaskStatusPolicyError
+            from app.utils.task_lock import archive_task as _archive
+            from app.utils.task_lock import unarchive_task as _unarchive
+
+            actor = resolve_hostname(user_id_var.get(None))
+            db = SessionLocal()
+            try:
+                tid = uuid.UUID(task_id)
+                task = db.query(TaskCard).filter(TaskCard.id == tid).first()
+                if task is None:
+                    return f"Error: task {task_id} não encontrada"
+                try:
+                    _assert_access(db, task.workspace_id)
+                except HTTPException as he:
+                    return f"Error: {he.detail}"
+                try:
+                    if archive:
+                        result = _archive(db, tid, expected_version, actor, reason=reason)
+                    else:
+                        result = _unarchive(db, tid, expected_version, actor)
+                except TaskStatusPolicyError as exc:
+                    return json.dumps(
+                        {"policy": True, "code": exc.code, "message": exc.message}
+                    )
+                if result.conflict:
+                    return json.dumps(
+                        {
+                            "conflict": True,
+                            "expected_version": expected_version,
+                            "current_version": result.version,
+                            "archived_at": result.archived_at,
+                        },
+                        default=str,
+                    )
+                return json.dumps(
+                    {
+                        "archived": archive,
+                        "task_id": task_id,
+                        "version": result.version,
+                        "status": task.status.value,
+                        "archived_at": result.archived_at,
+                        "archived_by": result.archived_by,
+                    },
+                    default=str,
+                )
+            finally:
+                db.close()
+        return await _run_blocking(_sync_op)
+    except Exception as e:  # noqa: BLE001
+        logging.exception(e)
+        return f"Error: {e}"
+
+
+@mcp.tool(description="Archive a task card WITHOUT deleting anything — the non-destructive alternative to delete_task. Use it for a card that was worked on and then cancelled or became obsolete: it disappears from list_tasks and the board by default, but keeps its column, assignee, status history and comments (list_tasks(include_archived=true) shows it again, with archived_at). Prefer delete_task only for a card created by mistake. An archived card cannot be claimed or moved until unarchive_task. Pass expected_version; on a version conflict this returns {conflict: true, current_version} and changes NOTHING. A card active with ANOTHER assignee is refused (policy not_assignee). Optional reason is recorded in the audit log.")
+async def archive_task(task_id: str, expected_version: int, reason: str | None = None) -> str:
+    return await _set_task_archived(task_id, expected_version, archive=True, reason=reason)
+
+
+@mcp.tool(description="Undo archive_task: the card reappears in list_tasks and on the board in the same column it was in, with history and comments intact. Pass expected_version; on a version conflict this returns {conflict: true, current_version} and changes NOTHING.")
+async def unarchive_task(task_id: str, expected_version: int) -> str:
+    return await _set_task_archived(task_id, expected_version, archive=False)
 
 
 def _warn_invalid_mcp_hostname(raw_uid: str | None) -> None:

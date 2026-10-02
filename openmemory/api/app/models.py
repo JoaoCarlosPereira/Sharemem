@@ -802,6 +802,11 @@ class TaskCard(Base):
     # Campos ricos do Kanban (kanban-planka / ADR-005) — Spec continua SoT.
     due_at = Column(DateTime, nullable=True, index=True)
     position = Column(sa.Float, nullable=False, default=65536.0, server_default="65536")
+    # Arquivamento não destrutivo (alternativa ao delete_task): o card sai da
+    # listagem padrão mas mantém coluna, histórico de status e comentários.
+    # ``archived_at`` nulo = card ativo. Ortogonal a ``status``.
+    archived_at = Column(DateTime, nullable=True, index=True)
+    archived_by = Column(String, nullable=True)
     created_at = Column(DateTime, default=get_current_utc_time, index=True)
     updated_at = Column(DateTime,
                         default=get_current_utc_time,

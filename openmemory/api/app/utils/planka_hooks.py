@@ -157,6 +157,20 @@ def mirror_delete_task(db: Session, task_id: UUID) -> None:
     run_mirror(db, lambda c: c.delete_task(task_id), action="delete_task")
 
 
+def mirror_archive_task_best_effort(db: Session, task_id: UUID, *, archived: bool) -> None:
+    """Projeta o arquivamento no PLANKA: tira o card do quadro ou o recria.
+
+    Spec é a fonte de verdade — o card, o histórico e os comentários continuam
+    no banco. No PLANKA o card arquivado simplesmente deixa de existir; ao
+    desarquivar, ``mirror_task`` o recria na coluna atual. Best-effort porque o
+    estado Spec já foi gravado quando isto roda.
+    """
+    if archived:
+        run_mirror_best_effort(db, lambda c: c.delete_task(task_id), action="archive_task")
+    else:
+        run_mirror_best_effort(db, lambda c: c.mirror_task(task_id), action="unarchive_task")
+
+
 def _lifecycle_flags(db: Session, workspace_id: UUID) -> tuple[bool, bool]:
     """Deriva ``(is_archived, is_completed)`` do ``SpecWorkspace.status`` atual.
 

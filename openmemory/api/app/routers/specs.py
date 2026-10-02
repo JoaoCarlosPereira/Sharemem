@@ -52,8 +52,10 @@ from app.utils.spec_search import (
 from app.utils.spec_versioning import write_document_version
 from app.utils.task_lock import (
     TaskStatusPolicyError,
+    archive_task,
     claim_task,
     release_task,
+    unarchive_task,
     update_task_metadata,
     update_task_status,
 )
@@ -156,6 +158,9 @@ class TaskResponse(BaseModel):
     checklist_done: int = 0
     checklist_total: int = 0
     attachment_count: int = 0
+    # Arquivamento não destrutivo: ``archived_at`` nulo = card ativo.
+    archived_at: Optional[datetime] = None
+    archived_by: Optional[str] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
@@ -230,6 +235,12 @@ class ClaimRequest(BaseModel):
 
 
 class ReleaseRequest(BaseModel):
+    actor: Optional[str] = None
+    reason: Optional[str] = None
+
+
+class ArchiveRequest(BaseModel):
+    expected_version: int
     actor: Optional[str] = None
     reason: Optional[str] = None
 
@@ -870,7 +881,7 @@ def _build_summaries(
     if ws_ids:
         rows = (
             db.query(TaskCard.workspace_id, TaskCard.status, func.count().label("c"))
-            .filter(TaskCard.workspace_id.in_(ws_ids))
+            .filter(TaskCard.workspace_id.in_(ws_ids), TaskCard.archived_at.is_(None))
             .group_by(TaskCard.workspace_id, TaskCard.status)
             .all()
         )
@@ -1039,7 +1050,7 @@ def get_workspace_board(
     )
     tasks = (
         db.query(TaskCard)
-        .filter(TaskCard.workspace_id == workspace_id)
+        .filter(TaskCard.workspace_id == workspace_id, TaskCard.archived_at.is_(None))
         .order_by(TaskCard.position.asc(), TaskCard.created_at.asc())
         .all()
     )
@@ -1685,6 +1696,9 @@ def list_workspace_tasks(
     status: Optional[TaskCardStatus] = Query(
         None, description="Filtra por coluna do Kanban"
     ),
+    include_archived: bool = Query(
+        False, description="Inclui cards arquivados (escondidos por padrão)"
+    ),
     db: Session = Depends(get_db),
 ) -> list[TaskResponse]:
     """Cards do workspace, opcionalmente filtrados por coluna.
@@ -1700,6 +1714,8 @@ def list_workspace_tasks(
     _assert_access(db, workspace_id)
 
     query = db.query(TaskCard).filter(TaskCard.workspace_id == workspace_id)
+    if not include_archived:
+        query = query.filter(TaskCard.archived_at.is_(None))
     if status is not None:
         query = query.filter(TaskCard.status == status)
     tasks = query.order_by(TaskCard.created_at.asc()).all()
@@ -1886,6 +1902,7 @@ def claim_task_endpoint(
                 "claimed": False,
                 "current_assignee": result.current_assignee,
                 "version": result.version,
+                "archived": result.archived,
             },
         )
     db.refresh(task)
@@ -1906,12 +1923,71 @@ def release_task_endpoint(
     _assert_access(db, task.workspace_id)
 
     actor = resolve_spec_actor(body_actor=payload.actor)
-    release_task(db, task_id, actor, payload.reason)
+    try:
+        release_task(db, task_id, actor, payload.reason)
+    except TaskStatusPolicyError as exc:
+        raise _policy_http(exc) from exc
     db.refresh(task)
     from app.utils.planka_hooks import mirror_task_status
 
     mirror_task_status(db, task_id)
     return _enrich_task(db, task)
+
+
+def _apply_archive(
+    db: Session, task_id: UUID, payload: ArchiveRequest, *, archive: bool
+) -> TaskResponse:
+    task = _get_task_or_404(db, task_id)
+    _assert_access(db, task.workspace_id)
+
+    actor = resolve_spec_actor(body_actor=payload.actor)
+    try:
+        if archive:
+            result = archive_task(
+                db, task_id, payload.expected_version, actor, reason=payload.reason
+            )
+        else:
+            result = unarchive_task(db, task_id, payload.expected_version, actor)
+    except TaskStatusPolicyError as exc:
+        raise _policy_http(exc) from exc
+    if result.conflict:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "conflict": True,
+                "current_version": result.version,
+                "archived_at": (
+                    result.archived_at.isoformat() if result.archived_at else None
+                ),
+            },
+        )
+    db.refresh(task)
+    return _enrich_task(db, task)
+
+
+@router.post("/tasks/{task_id}/archive", response_model=TaskResponse)
+def archive_task_endpoint(
+    task_id: UUID,
+    payload: ArchiveRequest,
+    db: Session = Depends(get_db),
+) -> TaskResponse:
+    """Arquiva o card sem apagar nada (alternativa não destrutiva ao DELETE).
+
+    Some da listagem padrão e do quadro; histórico de status e comentários são
+    preservados. 409 em conflito de versão, card já arquivado, ou card ativo de
+    outro assignee (exclusividade do claim — ADR-003).
+    """
+    return _apply_archive(db, task_id, payload, archive=True)
+
+
+@router.post("/tasks/{task_id}/unarchive", response_model=TaskResponse)
+def unarchive_task_endpoint(
+    task_id: UUID,
+    payload: ArchiveRequest,
+    db: Session = Depends(get_db),
+) -> TaskResponse:
+    """Desarquiva o card: volta à listagem na mesma coluna em que estava."""
+    return _apply_archive(db, task_id, payload, archive=False)
 
 
 @router.patch("/tasks/{task_id}/status", response_model=TaskResponse)

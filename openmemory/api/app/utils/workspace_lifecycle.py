@@ -49,17 +49,23 @@ def reconcile_workspace_completion_from_tasks(
     if workspace is None or workspace.status == SpecWorkspaceStatus.arquivado:
         return workspace
 
+    # Cards arquivados saíram do fluxo (cancelados/obsoletos): não seguram o
+    # workspace aberto nem contam como card do quadro.
     has_open_tasks = (
         db.query(TaskCard.id)
         .filter(
             TaskCard.workspace_id == workspace_id,
+            TaskCard.archived_at.is_(None),
             TaskCard.status != TaskCardStatus.concluido,
         )
         .first()
         is not None
     )
     has_any_cards = (
-        db.query(TaskCard.id).filter(TaskCard.workspace_id == workspace_id).first() is not None
+        db.query(TaskCard.id)
+        .filter(TaskCard.workspace_id == workspace_id, TaskCard.archived_at.is_(None))
+        .first()
+        is not None
         or db.query(SpecDocument.id).filter(SpecDocument.workspace_id == workspace_id).first()
         is not None
     )
