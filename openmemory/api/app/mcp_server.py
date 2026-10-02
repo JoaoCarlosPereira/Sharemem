@@ -652,21 +652,31 @@ async def search_memory(
                 )
             )
 
-        # Reranking (opt-in) refines relevance over the candidate pool before the
-        # boosts are applied, so recency/project/group still have the final say.
-        def _sync_rerank_and_rank():
-            r_status = None
-            if rerank:
-                r_status = apply_rerank(query, results)
-            # Rank the whole candidate pool, THEN cut the page: recency/project/group
-            # boosts must be able to promote a candidate that missed the raw top-K.
+        def _rank(items):
             rank_search_results(
-                results,
+                items,
                 preferred_project=project,
                 requester_group=requester_group,
                 annotate=True,
                 query=query,
             )
+
+        def _sync_rerank_and_rank():
+            # Rank the whole candidate pool, THEN cut the page: recency/project/group
+            # boosts must be able to promote a candidate that missed the raw top-K.
+            _rank(results)
+            if not rerank:
+                return None
+            # Reranking (opt-in) rescores only the best MEM0_RERANKER_TOP_N of that
+            # blend (bounded CPU cost), then the head is blended again with the
+            # normalized rerank score so recency/project/group keep the final say.
+            # On any failure/timeout ``results`` is untouched (original order).
+            r_status = apply_rerank(query, results, page_size=DEFAULT_SEARCH_TOP_K)
+            if r_status.get("applied"):
+                head_size = r_status["reranked"]
+                head = results[:head_size]
+                _rank(head)
+                results[:head_size] = head
             return r_status
 
         rerank_status = await _run_blocking(_sync_rerank_and_rank)

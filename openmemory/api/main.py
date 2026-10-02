@@ -5,8 +5,15 @@ import os
 # at module load time, so this must run before the app.* imports below.
 if (os.environ.get("MEM0_LOCAL_ONLY") or "").strip().lower() in ("1", "true", "yes", "on"):
     os.environ["MEM0_TELEMETRY"] = "false"
+    # Same reasoning for the optional Hugging Face stack (rerank, card 80110071):
+    # huggingface_hub/transformers read these at import time; without them loading
+    # a CrossEncoder pings huggingface.co on every startup and may download weights.
+    # app.utils.reranking enforces them again in its loader (scripts, bench).
+    for _hf_var in ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE", "HF_HUB_DISABLE_TELEMETRY"):
+        os.environ.setdefault(_hf_var, "1")
 
 import datetime
+import logging
 from uuid import uuid4
 
 from app.config import DEFAULT_APP_ID, USER_ID
@@ -48,6 +55,7 @@ from app.workers.write_worker import embedded_worker_enabled, write_worker
 from app.utils.logging_context import install_structured_logging
 from app.utils.tracing import configure_tracing
 from app.utils.deletion_guard import deletion_guard_status, log_deletion_guard_startup
+from app.utils.reranking import warmup_on_startup as warmup_reranker_on_startup
 from app.utils.write_guard import log_write_guard_startup
 from app.utils.write_queue_stall import write_queue_stall_watchdog
 from fastapi import FastAPI
@@ -221,6 +229,13 @@ async def _start_write_worker():
     spec_workspace_archive_worker.start()
     # Materializa falha na UI quando o write-worker morre/trava (heartbeat).
     write_queue_stall_watchdog.start()
+    # Rerank opt-in (card 80110071): sem MEM0_RERANKER_PROVIDER e no-op. Com ele,
+    # carrega o cross-encoder numa thread daemon — nunca bloqueia o startup nem
+    # o caminho quente da busca (MEM0_RERANKER_WARMUP=0 adia para a 1a busca).
+    try:
+        warmup_reranker_on_startup()
+    except Exception:  # noqa: BLE001 - rerank nunca derruba a API
+        logging.getLogger(__name__).exception("rerank warmup failed to start")
 
 
 @app.on_event("shutdown")

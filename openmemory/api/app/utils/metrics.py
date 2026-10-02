@@ -7,6 +7,17 @@ SEARCH_LATENCY = Histogram(
     "Latency of MCP search_memory calls",
     buckets=(0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0),
 )
+# Rerank opcional (card 80110071): so recebe amostras com MEM0_RERANKER_PROVIDER.
+RERANK_LATENCY = Histogram(
+    "mcp_rerank_latency_seconds",
+    "Latency of the cross-encoder rerank pass inside search_memory",
+    buckets=(0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0),
+)
+RERANK_OUTCOME = Counter(
+    "mcp_rerank_total",
+    "Rerank attempts by outcome (applied|timeout|failed|busy|circuit_open|loading|unavailable)",
+    ["outcome"],
+)
 EMBED_CACHE_HIT = Counter("embed_cache_hit_total", "Embedding cache hits")
 EMBED_CACHE_MISS = Counter("embed_cache_miss_total", "Embedding cache misses")
 SEARCH_CACHE_HIT = Counter("search_cache_hit_total", "Search result cache hits")

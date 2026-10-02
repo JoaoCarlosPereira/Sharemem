@@ -15,6 +15,11 @@ x-api-common: &api-common
   build:
     context: ..
     dockerfile: openmemory/api/Dockerfile
+    # Rerank local opcional (card 80110071; docs/runbooks/rerank.md). Default 0 =
+    # imagem sem torch. O provider liga por MEM0_RERANKER_* em api/.env.
+    args:
+      INSTALL_RERANK: ${INSTALL_RERANK:-0}
+      RERANK_PRELOAD_MODEL: ${RERANK_PRELOAD_MODEL:-}
   restart: unless-stopped
   extra_hosts:
     - "host.docker.internal:host-gateway"
