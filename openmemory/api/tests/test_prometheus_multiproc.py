@@ -240,15 +240,155 @@ def test_entrypoint_creates_missing_dir_and_noop_without_env(tmp_path):
     assert proc.stdout.strip() == "plain"
 
 
-def test_entrypoint_refuses_root_dir():
-    proc = subprocess.run(
-        ["sh", str(API_DIR / "docker-entrypoint.sh"), "true"],
-        env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "PROMETHEUS_MULTIPROC_DIR": "/"},
+def _run_entrypoint(mp_dir: str, *cmd: str, cwd: Path | None = None) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["sh", str(API_DIR / "docker-entrypoint.sh"), *(cmd or ("echo", "ran"))],
+        env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "PROMETHEUS_MULTIPROC_DIR": mp_dir},
+        cwd=str(cwd) if cwd else None,
         capture_output=True,
         text=True,
         timeout=30,
     )
-    assert proc.returncode != 0
+
+
+def _assert_refused(proc: subprocess.CompletedProcess, reason: str) -> None:
+    assert proc.returncode == 64, (proc.returncode, proc.stderr)
+    assert "recusado" in proc.stderr and reason in proc.stderr, proc.stderr
+    # Comando nunca é executado quando a validação falha.
+    assert "ran" not in proc.stdout
+
+
+# Nomes reais do prometheus_client (values.MultiProcessValue: "<prefixo>_<pid>.db",
+# prefixo = tipo ou "gauge_<multiprocess_mode>").
+_PROM_FILES = (
+    "counter_123.db",
+    "histogram_123.db",
+    "summary_123.db",
+    "gauge_all_123.db",
+    "gauge_liveall_1.db",
+    "gauge_min_2.db",
+    "gauge_livemin_3.db",
+    "gauge_max_4.db",
+    "gauge_livemax_5.db",
+    "gauge_sum_6.db",
+    "gauge_livesum_7.db",
+    "gauge_mostrecent_8.db",
+    "gauge_livemostrecent_9.db",
+)
+
+_NON_PROM_FILES = (
+    "outro.db",
+    "counter.db",
+    "counter_.db",
+    "counter_abc.db",
+    "counter_1_2.db",
+    "gauge_123.db",
+    "gauge_bogus_123.db",
+    "gauge_livesum_.db",
+    "histogram_12x.db",
+    "my_counter_1.db",
+    "counter_1.db.bak",
+    "counter_1.sqlite",
+)
+
+
+def test_entrypoint_removes_only_prometheus_client_files(tmp_path):
+    mp_dir = tmp_path / "mp"
+    mp_dir.mkdir()
+    for name in _PROM_FILES + _NON_PROM_FILES:
+        (mp_dir / name).write_bytes(b"x")
+    sub = mp_dir / "sub"
+    sub.mkdir()
+    (sub / "counter_1.db").write_bytes(b"x")
+    proc = _run_entrypoint(str(mp_dir))
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == "ran"
+    remaining = {p.name for p in mp_dir.iterdir()}
+    assert remaining.isdisjoint(_PROM_FILES), remaining
+    assert set(_NON_PROM_FILES) <= remaining
+    # Não desce em subdiretórios.
+    assert (sub / "counter_1.db").exists()
+
+
+def test_entrypoint_does_not_follow_or_remove_symlinks(tmp_path):
+    target_dir = tmp_path / "data"
+    target_dir.mkdir()
+    target = target_dir / "precioso.db"
+    target.write_bytes(b"x")
+    mp_dir = tmp_path / "mp"
+    mp_dir.mkdir()
+    (mp_dir / "counter_1.db").symlink_to(target)
+    proc = _run_entrypoint(str(mp_dir))
+    assert proc.returncode == 0, proc.stderr
+    assert target.exists()
+    assert (mp_dir / "counter_1.db").is_symlink()
+
+
+def test_entrypoint_matches_files_created_by_installed_prometheus_client(multiproc_result):
+    """Os arquivos reais gerados pela versão instalada casam com os padrões."""
+    _, mp_dir = multiproc_result
+    created = sorted(p.name for p in mp_dir.glob("*.db"))
+    assert created
+    copy_dir = mp_dir.parent / "mp_copy"
+    copy_dir.mkdir(exist_ok=True)
+    for name in created:
+        (copy_dir / name).write_bytes(b"x")
+    proc = _run_entrypoint(str(copy_dir))
+    assert proc.returncode == 0, proc.stderr
+    assert not list(copy_dir.glob("*.db")), created
+
+
+def test_entrypoint_refuses_dir_with_openmemory_db(tmp_path):
+    data_dir = tmp_path / "workdir"
+    data_dir.mkdir()
+    db = data_dir / "openmemory.db"
+    db.write_bytes(b"SQLite format 3\x00")
+    other = data_dir / "outro.db"
+    other.write_bytes(b"x")
+    prom = data_dir / "counter_1.db"
+    prom.write_bytes(b"x")
+    proc = _run_entrypoint(str(data_dir))
+    _assert_refused(proc, "openmemory.db")
+    # Recusa é total: nada é apagado, nem os arquivos do prometheus.
+    assert db.read_bytes() == b"SQLite format 3\x00"
+    assert other.exists()
+    assert prom.exists()
+
+
+def test_entrypoint_refuses_openmemory_db_via_relative_and_symlinked_dir(tmp_path):
+    data_dir = tmp_path / "workdir"
+    data_dir.mkdir()
+    db = data_dir / "openmemory.db"
+    db.write_bytes(b"x")
+    link = tmp_path / "link"
+    link.symlink_to(data_dir, target_is_directory=True)
+    _assert_refused(_run_entrypoint(".", cwd=data_dir), "openmemory.db")
+    _assert_refused(_run_entrypoint(str(link) + "/"), "openmemory.db")
+    assert db.exists()
+
+
+@pytest.mark.parametrize("root", ["/", "//", "///", "/.", "/./", "/./.", "//.//", "/tmp/..", "/tmp/../."])
+def test_entrypoint_refuses_root_dir_in_any_form(root):
+    _assert_refused(_run_entrypoint(root), "diretório raiz")
+
+
+def test_entrypoint_refuses_relative_path_resolving_to_root():
+    _assert_refused(_run_entrypoint("../../../../../../../../..", cwd=Path("/tmp")), "diretório raiz")
+
+
+def test_entrypoint_refuses_symlink_to_root(tmp_path):
+    link = tmp_path / "rootlink"
+    link.symlink_to("/", target_is_directory=True)
+    _assert_refused(_run_entrypoint(str(link)), "diretório raiz")
+
+
+@pytest.mark.parametrize(
+    "workdir",
+    ["/usr/src/openmemory", "/usr/src/openmemory/", "//usr//src/./openmemory/.", "/usr/src/openmemory/app/.."],
+)
+def test_entrypoint_refuses_image_workdir(workdir):
+    # Recusa léxica antes do mkdir: funciona mesmo fora do container.
+    _assert_refused(_run_entrypoint(workdir), "WORKDIR")
 
 
 # -- deploy: compose/Dockerfile ----------------------------------------------
