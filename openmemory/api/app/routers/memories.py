@@ -114,6 +114,31 @@ def _author_hostname_from_memory(memory) -> Optional[str]:
     return None
 
 
+def ui_reader_actor(fallback_user_id: Optional[str]) -> Optional[str]:
+    """Actor string for read-audit rows written by Web UI reads.
+
+    The UI sends ``?user_id=`` from ``NEXT_PUBLIC_USER_ID`` — a *build-time*
+    constant shared by every browser (``OPENMEMORY_UI_USER_ID``), so it named
+    the same person for all viewers. Order:
+
+    1. valid Google session JWT → ``ui:<sub>`` (``User.id``, resolved to a person);
+    2. otherwise → ``ui:anonymous`` (never resolved to a person).
+
+    ``fallback_user_id`` (the REST ``?user_id=``) is intentionally NOT recorded:
+    it is client-supplied and, from the UI, always the shared build id — the
+    reader cannot be inferred from it.
+    """
+    from app.utils.creator_identity import UI_ANONYMOUS_ACTOR
+    from app.utils.logging_context import auth_method_var, auth_user_var
+
+    del fallback_user_id  # kept in the signature for call-site readability
+    if auth_method_var.get() == "session":
+        person = (auth_user_var.get() or "").strip()
+        if person:
+            return f"ui:{person}"
+    return UI_ANONYMOUS_ACTOR
+
+
 def memory_group_name(memory) -> Optional[str]:
     """Grupo (equipe) do autor da memória via hostname → User → Group (task_09).
 
@@ -444,7 +469,7 @@ async def get_memory(
             memory_ids=[str(memory_id)],
             access_type="get",
             source="api",
-            hostname=f"ui:{user_id}" if user_id else None,
+            hostname=ui_reader_actor(user_id),
             client_name="openmemory",
             items=[{"id": str(memory_id), "project": proj, "metadata_": shared.get("metadata_")}],
         )
@@ -630,20 +655,35 @@ async def get_memory_access_log(
     memory_id: UUID,
     page: int = Query(1, ge=1),
     page_size: int = Query(10, ge=1, le=100),
+    grouped: bool = Query(True, description="Collapse repeated reads by the same actor/type within the window"),
+    channel: Optional[str] = Query(
+        None,
+        pattern="^(web|mcp|api|agents)$",
+        description="Restrict to one channel: web (UI), mcp, api (compat v3), agents (mcp + api)",
+    ),
     db: Session = Depends(get_db)
 ):
-    from app.utils.read_audit import list_memory_read_audit, utc_isoformat
+    from app.utils.read_audit import list_memory_read_audit_page, utc_isoformat
 
     mid = str(memory_id)
 
     # Qdrant/MCP reads land in read_audit_logs (no SQL memories FK).
-    audit_total, audit_logs = list_memory_read_audit(db, mid, page=page, page_size=page_size)
-    if audit_total:
+    audit = list_memory_read_audit_page(
+        db, mid, page=page, page_size=page_size, grouped=grouped, channel=channel
+    )
+    if audit["raw_total"] or channel or sum(audit["channel_counts"].values()):
         return {
-            "total": audit_total,
+            "total": audit["total"],
             "page": page,
             "page_size": page_size,
-            "logs": audit_logs,
+            "logs": audit["logs"],
+            # Additive (card 01ada614): raw rows vs display entries + grouping info.
+            "raw_total": audit["raw_total"],
+            "grouped": audit["grouped"],
+            "group_window_seconds": audit["group_window_seconds"],
+            "grouping_truncated": audit["grouping_truncated"],
+            "channel": audit["channel"],
+            "channel_counts": audit["channel_counts"],
         }
 
     # Legacy SQL-backed memories still use memory_access_logs.
@@ -791,7 +831,7 @@ async def filter_shared_memories(request: FilterMemoriesRequest):
         memory_ids=[i["id"] for i in audit_items],
         access_type="search" if request.search_query else "list",
         source="api",
-        hostname=f"ui:{request.user_id}" if request.user_id else None,
+        hostname=ui_reader_actor(request.user_id),
         client_name="openmemory",
         query=request.search_query,
         items=audit_items,
@@ -969,24 +1009,49 @@ async def get_related_memories(
     )
 
 
+def _rebind_route_endpoint(router, original, wrapped) -> int:
+    """Point already-registered routes at ``wrapped``; returns how many changed.
+
+    ``@router.get`` builds the route's ``Dependant`` (and request handler) from
+    the function object at import time, so rebinding the module attribute alone
+    leaves dispatch on the unwrapped function — the admin reads went unaudited.
+    """
+    from fastapi.routing import APIRoute, request_response
+
+    changed = 0
+    for route in getattr(router, "routes", []):
+        if not isinstance(route, APIRoute) or route.endpoint is not original:
+            continue
+        route.endpoint = wrapped
+        route.dependant.call = wrapped
+        route.app = request_response(route.get_route_handler())
+        changed += 1
+    return changed
+
+
 def install_admin_read_audit() -> None:
     try:
+        from functools import wraps
+
         from app.routers import admin as admin_mod
-        from app.utils.read_audit import record_memory_reads
+        from app.utils import read_audit as read_audit_mod
 
         if getattr(admin_mod.project_memories, "_read_audit_wrapped", False):
             return
 
         original = admin_mod.project_memories
 
+        # ``wraps`` keeps the original signature (Query bounds) for FastAPI.
+        @wraps(original)
         def wrapped(project: str, search=None, limit: int = 100):
             result = original(project=project, search=search, limit=limit)
             items = result.get("items") or []
-            record_memory_reads(
+            read_audit_mod.record_memory_reads(
                 project=project,
                 memory_ids=[i.get("id") for i in items],
                 access_type="search" if search else "list",
                 source="admin",
+                hostname=ui_reader_actor(None),
                 query=search,
                 items=[
                     {"id": i.get("id"), "project": project, "metadata": {"project": project}}
@@ -997,6 +1062,10 @@ def install_admin_read_audit() -> None:
 
         wrapped._read_audit_wrapped = True  # type: ignore[attr-defined]
         admin_mod.project_memories = wrapped
+        if not _rebind_route_endpoint(admin_mod.router, original, wrapped):
+            logging.getLogger(__name__).error(
+                "admin read-audit: route /admin/projects/{project}/memories not rebound — reads unaudited"
+            )
     except Exception:  # noqa: BLE001
         logging.getLogger(__name__).warning("admin read-audit wrapper not installed", exc_info=True)
 

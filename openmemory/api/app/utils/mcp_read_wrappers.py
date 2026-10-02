@@ -8,13 +8,19 @@ patches something nothing calls.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
-from functools import wraps
+from functools import partial, wraps
 from typing import Callable
 
 logger = logging.getLogger(__name__)
 _installed = False
+
+# Background audit writes in flight. Strong references keep the tasks alive
+# until done (asyncio only holds weak refs); tests await them via
+# :func:`drain_pending_read_audits`.
+_pending: set[asyncio.Future] = set()
 
 
 def _audit_results(
@@ -38,6 +44,56 @@ def _audit_results(
         query=query,
         items=results,
     )
+
+
+def _schedule_audit(**kwargs) -> None:
+    """Record the read in a worker thread without delaying the MCP response.
+
+    ``record_memory_reads`` is one batched INSERT + commit for all result rows,
+    but it is synchronous DB I/O; running it inline on the event loop stalled
+    every MCP session on the same worker. Identity (hostname/client) must be
+    captured by the caller *before* scheduling — contextvars are read here.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        _audit_results(**kwargs)
+        return
+    future = loop.run_in_executor(None, partial(_audit_results, **kwargs))
+    _pending.add(future)
+
+    def _done(fut: asyncio.Future) -> None:
+        _pending.discard(fut)
+        exc = fut.exception() if not fut.cancelled() else None
+        if exc is not None:
+            logger.warning("mcp read-audit failed: %s", exc)
+
+    future.add_done_callback(_done)
+
+
+async def drain_pending_read_audits(timeout: float | None = None) -> bool:
+    """Await in-flight background audit writes (tests / graceful shutdown).
+
+    With ``timeout`` (seconds) gives up after that long so a stuck DB never
+    blocks shutdown; returns ``True`` when everything was flushed.
+    """
+
+    async def _drain() -> None:
+        while _pending:
+            batch = list(_pending)
+            await asyncio.gather(*batch, return_exceptions=True)
+            # Done-callbacks also discard, but do it here so draining never spins.
+            _pending.difference_update(batch)
+
+    if timeout is None:
+        await _drain()
+        return True
+    try:
+        await asyncio.wait_for(_drain(), timeout=timeout)
+    except asyncio.TimeoutError:
+        logger.warning("read-audit: %d pending write(s) not flushed before shutdown", len(_pending))
+        return False
+    return True
 
 
 def _wrap_search(fn: Callable) -> Callable:
@@ -72,7 +128,7 @@ def _wrap_search(fn: Callable) -> Callable:
             payload = json.loads(out)
             results = payload.get("results") or []
             if isinstance(results, list) and results:
-                _audit_results(
+                _schedule_audit(
                     project=project,
                     results=results,
                     access_type="search",
@@ -110,7 +166,7 @@ def _wrap_list(fn: Callable) -> Callable:
             payload = json.loads(out)
             results = payload.get("results") or []
             if isinstance(results, list) and results:
-                _audit_results(
+                _schedule_audit(
                     project=project,
                     results=results,
                     access_type="list",

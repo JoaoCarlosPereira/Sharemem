@@ -230,3 +230,7 @@ async def _stop_write_worker():
     await spec_task_timeout_worker.stop()
     await spec_workspace_archive_worker.stop()
     await write_queue_stall_watchdog.stop()
+    # Flush MCP read-audit rows still running in the thread pool (card 01ada614).
+    from app.utils.mcp_read_wrappers import drain_pending_read_audits
+
+    await drain_pending_read_audits(timeout=float(os.getenv("READ_AUDIT_DRAIN_TIMEOUT_SECONDS", "5")))

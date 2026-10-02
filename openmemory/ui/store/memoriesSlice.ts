@@ -2,21 +2,15 @@ import { createSlice, PayloadAction } from '@reduxjs/toolkit';
 import { Memory } from '@/components/types';
 import { SimpleMemory } from '@/hooks/useMemoriesApi';
 
-interface AccessLogEntry {
-  id: string;
-  app_name: string;
-  display_name?: string;
-  avatar_url?: string;
-  client_name?: string;
-  hostname?: string;
-  accessed_at: string;
-}
+import type { AccessLogEntry, AccessLogMeta } from '@/types/accessLog';
 
 // Define the shape of the memories state
 interface MemoriesState {
   memories: Memory[];
   selectedMemory: SimpleMemory | null;
   accessLogs: AccessLogEntry[];
+  /** Metadados da última página do log (agrupamento, canais). */
+  accessLogMeta: AccessLogMeta | null;
   relatedMemories: Memory[];
   status: 'idle' | 'loading' | 'succeeded' | 'failed';
   error: string | null;
@@ -27,6 +21,7 @@ const initialState: MemoriesState = {
   memories: [],
   selectedMemory: null,
   accessLogs: [],
+  accessLogMeta: null,
   relatedMemories: [],
   status: 'idle',
   error: null,
@@ -42,6 +37,9 @@ const memoriesSlice = createSlice({
     },
     setAccessLogs: (state, action: PayloadAction<AccessLogEntry[]>) => {
       state.accessLogs = action.payload;
+    },
+    setAccessLogMeta: (state, action: PayloadAction<AccessLogMeta | null>) => {
+      state.accessLogMeta = action.payload;
     },
     setMemoriesLoading: (state) => {
       state.status = 'loading';
@@ -64,6 +62,7 @@ const memoriesSlice = createSlice({
       state.selectedMemoryIds = [];
       state.selectedMemory = null;
       state.accessLogs = [];
+      state.accessLogMeta = null;
       state.relatedMemories = [];
     },
     selectMemory: (state, action: PayloadAction<string>) => {
@@ -98,6 +97,7 @@ export const {
   clearSelection,
   setSelectedMemory,
   setAccessLogs,
+  setAccessLogMeta,
   setRelatedMemories
 } = memoriesSlice.actions;
 
