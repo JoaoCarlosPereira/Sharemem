@@ -26,10 +26,12 @@ def _audit_results(
     hostname: str | None = None,
     client_name: str | None = None,
 ) -> None:
+    from app.utils.project_name import normalize_project
     from app.utils.read_audit import record_memory_reads
 
     record_memory_reads(
-        project=project,
+        # Mesma chave efetiva usada pela tool (ver app.utils.project_name).
+        project=normalize_project(project),
         memory_ids=[r.get("id") for r in results],
         access_type=access_type,
         source="mcp",

@@ -19,6 +19,7 @@ from app.utils.db import get_or_create_user
 from app.utils.deletion_guard import DeletionBlockedError, assert_bulk_delete_allowed, assert_memory_delete_allowed
 from app.utils.memory import get_memory_client
 from app.utils.permissions import check_memory_access_permissions
+from app.utils.project_name import normalize_project
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi_pagination import Page, Params
 from fastapi_pagination.ext.sqlalchemy import paginate as sqlalchemy_paginate
@@ -296,6 +297,13 @@ async def create_memory(
     user = db.query(User).filter(User.user_id == request.user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
+    # ``metadata.project`` (quando enviado) usa a mesma chave efetiva do caminho
+    # compartilhado: whitespace interno -> '-' (ver app.utils.project_name).
+    if isinstance((request.metadata or {}).get("project"), str):
+        request.metadata = {
+            **request.metadata,
+            "project": normalize_project(request.metadata["project"]),
+        }
     # Get or create app
     app_obj = db.query(App).filter(App.name == request.app,
                                    App.owner_id == user.id).first()
@@ -741,6 +749,8 @@ async def filter_shared_memories(request: FilterMemoriesRequest):
     """List project-scoped memories from Qdrant (MCP write path)."""
     from app.utils.vector_stats import list_shared_memories
 
+    # Filtro por projeto com a mesma chave da escrita ("A B" acha "A-B").
+    request.project = normalize_project(request.project)
     try:
         data = list_shared_memories(
             search=request.search_query,
