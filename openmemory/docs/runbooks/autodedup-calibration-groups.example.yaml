@@ -1,0 +1,24 @@
+# Grupos-gabarito para scripts/autodedup-calibrate-groups.py (card ddbc19a9).
+# Cada grupo = memórias que afirmam a MESMA coisa. Use `ids` (preferível, fixa o
+# gabarito) e/ou `query` (+ `project`, `top` = quantos hits viram membros).
+# Depois da 1ª rodada, confira `members` na saída e troque as queries pelos ids.
+groups:
+  - name: sicredi-trgn
+    project: sysmovs
+    query: "Sicredi 748/BB/Itau/Banrisul usam TRgnFinanceiroBoletoHibrido"
+    top: 3
+  - name: patch-204
+    project: sysmovs
+    query: "PATCH /boletos/{nossoNumero} retorna 204"
+    top: 2
+  - name: fin104
+    project: sysmovs
+    query: "Fin104 persiste em GCVPRM02.JSON_DADOS_API"
+    top: 2
+  - name: fcr722
+    project: sysmovs
+    query: "Cobranca bancaria na tela Fcr722"
+    top: 3
+  # Exemplo com ids fixos:
+  # - name: patch-204
+  #   ids: ["00000000-0000-0000-0000-000000000001", "00000000-0000-0000-0000-000000000002"]

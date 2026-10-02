@@ -477,6 +477,41 @@ class WriteAuditLog(Base):
     )
 
 
+class AutodedupReport(Base):
+    """One near-duplicate candidate seen by ``MEM0_AUTODEDUP_MODE=report``.
+
+    Report mode only *observes*: nothing here is ever applied to Qdrant. The rows
+    exist so the threshold can be calibrated from real traffic via
+    ``GET /admin/autodedup/report`` instead of scraping write-worker logs. Rows
+    with ``above_threshold = False`` are "near misses" (score between
+    ``MEM0_AUTODEDUP_REPORT_FLOOR`` and the threshold) recorded only to see what a
+    lower threshold would catch. Texts are short truncated excerpts, and the
+    table is pruned by retention (days + max rows) — see app.utils.autodedup_report.
+
+    Only report mode writes here, so there is no ``mode`` column. Indexes follow
+    the actual queries: ``created_at`` (retention + ``since``), ``score``
+    (``min_score``/ordering) and ``(project, created_at)`` (project filter; its
+    prefix already serves ``project`` alone). ``job_id`` is informational only.
+    """
+    __tablename__ = "autodedup_reports"
+    id = Column(UUID, primary_key=True, default=lambda: uuid.uuid4())
+    created_at = Column(DateTime, nullable=False, default=get_current_utc_time, index=True)
+    job_id = Column(String, nullable=True)
+    project = Column(String, nullable=True)
+    new_memory_id = Column(String, nullable=False)
+    duplicate_memory_id = Column(String, nullable=False)
+    duplicate_project = Column(String, nullable=True)
+    score = Column(sa.Float, nullable=False, index=True)
+    threshold = Column(sa.Float, nullable=False)
+    above_threshold = Column(Boolean, nullable=False, default=False)
+    new_text = Column(String, nullable=True)
+    duplicate_text = Column(String, nullable=True)
+
+    __table_args__ = (
+        Index('idx_autodedup_reports_project_time', 'project', 'created_at'),
+    )
+
+
 class GovernanceJob(Base):
     """Persistent governance job queue (Fase 3 / ADR-002).
 
