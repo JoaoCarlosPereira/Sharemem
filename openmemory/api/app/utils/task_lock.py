@@ -39,6 +39,9 @@ class ClaimTaskResult:
     # ``True`` quando o claim falhou porque o card está arquivado (e não por
     # exclusividade): o chamador deve desarquivar antes, não escolher outro card.
     archived: bool = False
+    # Status efetivo após o claim (``em_andamento`` no claim normal/reassunção;
+    # o status original na adoção de card sem dono fora do backlog).
+    status: str | None = None
 
 
 @dataclass
@@ -140,6 +143,13 @@ def claim_task(db: Session, task_id: uuid.UUID, claimant: str) -> ClaimTaskResul
        únicas saídas eram ``release_task`` (que perde a atribuição e faz o card
        parecer abandonado) ou mentir sobre a coluna com ``is_blocked``.
 
+    3. **Adoção de task sem dono fora do backlog** (``assignee is None`` e
+       status ∉ {``tasks``, ``concluido``}) — ex.: card criado na UI do PLANKA
+       direto em ``revisao_codigo`` e importado. Atribui o chamador e **mantém o
+       status atual** (não é uma transição: nenhuma regra de pipeline/skip é
+       contornada). Registra auditoria ``adopt_task``; sem linha em
+       ``TaskStatusHistory`` porque o status não muda.
+
     Falha (``claimed=False``) apenas quando a task está ativa com assignee
     DIFERENTE — a exclusividade para terceiros continua intacta. Retorna o
     ``assignee`` vigente para o chamador reconciliar.
@@ -164,10 +174,23 @@ def claim_task(db: Session, task_id: uuid.UUID, claimant: str) -> ClaimTaskResul
     # objeto lido) para manter a atomicidade — entre o SELECT e o UPDATE outro
     # processo pode ter liberado ou reatribuído a task.
     is_reclaim = task.assignee == claimant and old_status != TaskCardStatus.tasks
+    is_adopt = (
+        not is_reclaim
+        and task.assignee is None
+        and old_status not in (TaskCardStatus.tasks, TaskCardStatus.concluido)
+    )
+    new_status = old_status if is_adopt else TaskCardStatus.em_andamento
     if is_reclaim:
         guard = sa.and_(
             TaskCard.id == task_id,
             TaskCard.assignee == claimant,
+        )
+    elif is_adopt:
+        # Atômico: só adota se continua sem dono e na mesma coluna.
+        guard = sa.and_(
+            TaskCard.id == task_id,
+            TaskCard.assignee.is_(None),
+            TaskCard.status == old_status,
         )
     else:
         guard = sa.and_(
@@ -180,7 +203,7 @@ def claim_task(db: Session, task_id: uuid.UUID, claimant: str) -> ClaimTaskResul
         .where(guard, TaskCard.archived_at.is_(None))
         .values(
             assignee=claimant,
-            status=TaskCardStatus.em_andamento,
+            status=new_status,
             version=TaskCard.version + 1,
             last_activity_at=now,
             updated_at=now,
@@ -197,21 +220,26 @@ def claim_task(db: Session, task_id: uuid.UUID, claimant: str) -> ClaimTaskResul
             archived=fresh.archived_at is not None,
         )
 
-    if old_status != TaskCardStatus.em_andamento:
+    if old_status != new_status:
         db.add(
             TaskStatusHistory(
                 task_id=task_id,
                 old_status=old_status,
-                new_status=TaskCardStatus.em_andamento,
+                new_status=new_status,
                 changed_by=claimant,
             )
         )
+    action = "reclaim_task" if is_reclaim else ("adopt_task" if is_adopt else "claim_task")
     db.add(
         SpecAuditLog(
             workspace_id=task.workspace_id,
             actor=claimant,
-            action="reclaim_task" if is_reclaim else "claim_task",
-            detail={"task_id": str(task_id), "from_status": old_status.value},
+            action=action,
+            detail={
+                "task_id": str(task_id),
+                "from_status": old_status.value,
+                "to_status": new_status.value,
+            },
         )
     )
     db.commit()
@@ -226,6 +254,7 @@ def claim_task(db: Session, task_id: uuid.UUID, claimant: str) -> ClaimTaskResul
         current_assignee=claimant,
         version=fresh.version,
         expires_at=claim_expires_at(fresh.last_activity_at),
+        status=new_status.value,
     )
 
 

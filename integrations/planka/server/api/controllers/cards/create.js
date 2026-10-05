@@ -104,6 +104,7 @@
 
 const { isDueDate, isStopwatch } = require('../../../utils/validators');
 const { idInput } = require('../../../utils/inputs');
+const { shouldNotifyCardCreated } = require('../../../utils/mem0-card-create');
 
 const Errors = {
   NOT_ENOUGH_RIGHTS: {
@@ -211,6 +212,31 @@ module.exports = {
         request: this.req,
       })
       .intercept('positionMustBeInValues', () => Errors.POSITION_MUST_BE_PRESENT);
+
+    // Mem0: card criado por pessoa na UI (sessão JWT) vira task Spec. Best-effort:
+    // falha não desfaz o card; o helper registra warn e o backfill admin recupera.
+    const authMethod = this.req.mem0Auth && this.req.mem0Auth.method;
+    if (shouldNotifyCardCreated({ authMethod })) {
+      try {
+        await sails.helpers.mem0.notifySpecCardCreate.with({
+          plankaCardId: String(card.id),
+          plankaListId: String(list.id),
+          name: card.name,
+          description: card.description,
+          dueDate: card.dueDate ? new Date(card.dueDate).toISOString() : null,
+          position: card.position,
+          actor: String(
+            (this.req.mem0Auth && this.req.mem0Auth.subject) ||
+              currentUser.username ||
+              currentUser.email ||
+              currentUser.id ||
+              'ui-user',
+          ),
+        });
+      } catch (bridgeErr) {
+        sails.log.warn('mem0: card-created bridge failed (card kept)', bridgeErr);
+      }
+    }
 
     return {
       item: card,

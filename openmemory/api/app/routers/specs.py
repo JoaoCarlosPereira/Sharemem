@@ -1431,6 +1431,58 @@ def planka_card_updated(
     return PlankaCardUpdateResponse(**result)
 
 
+class PlankaCardCreateRequest(BaseModel):
+    planka_card_id: str
+    planka_list_id: str
+    name: Optional[str] = None
+    description: Optional[str] = None
+    due_date: Optional[datetime] = None
+    position: Optional[float] = None
+    actor: Optional[str] = None
+
+
+def planka_ui_import_enabled() -> bool:
+    """Kill switch do import PLANKA → Spec (``PLANKA_IMPORT_UI_CARDS=0`` desliga)."""
+    import os
+
+    raw = (os.getenv("PLANKA_IMPORT_UI_CARDS") or "1").strip().lower()
+    return raw not in ("0", "false", "no", "off")
+
+
+@router.post("/planka/card-created", response_model=PlankaCardMoveResponse)
+def planka_card_created(
+    payload: PlankaCardCreateRequest,
+    authorization: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+) -> PlankaCardMoveResponse:
+    """Bridge PLANKA → Spec: card criado por uma pessoa (sessão JWT) na tela do PLANKA.
+
+    Cria a ``TaskCard`` no workspace dono da lista, com status = coluna e sem
+    assignee. Idempotente: card já mapeado → ``already_mapped``. Listas não
+    mapeadas/SDD → ``applied=False``.
+    """
+    from app.utils.planka import is_planka_id
+    from app.utils.planka_import import import_planka_card
+
+    _assert_planka_bridge_token(authorization)
+    if not planka_ui_import_enabled():
+        return PlankaCardMoveResponse(applied=False, reason="import_disabled")
+    # Valida o valor bruto (sem strip): o PLANKA envia String(id); "12\n" é inválido.
+    if not (is_planka_id(payload.planka_card_id) and is_planka_id(payload.planka_list_id)):
+        return PlankaCardMoveResponse(applied=False, reason="invalid_id")
+    result = import_planka_card(
+        db,
+        planka_card_id=payload.planka_card_id,
+        planka_list_id=payload.planka_list_id,
+        name=payload.name,
+        description=payload.description,
+        due_date=payload.due_date,
+        position=payload.position,
+        actor=(payload.actor or resolve_spec_actor() or "planka-ui").strip(),
+    )
+    return PlankaCardMoveResponse(**result)
+
+
 class PlankaProjectLifecycleRequest(BaseModel):
     planka_project_id: str
     is_archived: bool

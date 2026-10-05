@@ -510,7 +510,7 @@ async def test_mirror_assignee_prefers_linked_google_email(db_session, monkeypat
     )
 
     client = CaptureClient(db_session)
-    await client._mirror_task_assignee(task, "card-1")
+    await client._mirror_task_assignee(task, "1001")
     assert calls
     body = calls[0][2]
     assert body["email"] == "joaocarlos@sysmo.com.br"
