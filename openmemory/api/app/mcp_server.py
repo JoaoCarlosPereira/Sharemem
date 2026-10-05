@@ -53,8 +53,10 @@ from app.utils.partitioning import bind_active_collection
 from app.utils.permissions import check_memory_access_permissions
 from app.utils.read_cache import read_cache
 from app.utils.project_groups import projects_in_group
+from app.utils.project_name import normalize_project, normalize_project_with_notice
 from app.utils.recency import rank_search_results
 from app.utils.scope_keys import normalize_task, resolve_task
+from app.utils.spec_auth import resolve_spec_creator_email
 from app.utils.reranking import apply_rerank
 from app.utils.token_usage_wrapper import usage_attribution
 from app.utils.write_guard import check_write_allowed
@@ -225,7 +227,10 @@ async def add_memories(
         )
         return blocked
 
-    project = project.strip()
+    # Chave efetiva: o SDK rejeita whitespace interno no worker (job falhava em
+    # silencio depois do ack). Normaliza aqui e informa o projeto efetivo.
+    original_project = project.strip()
+    project, project_notice = normalize_project_with_notice(project)
     supersede_ids: list[str] = []
     if supersedes:
         for mid in supersedes:
@@ -299,6 +304,9 @@ async def add_memories(
         ),
         "project": project,
     }
+    if project_notice:
+        payload["project_requested"] = original_project
+        payload["warning"] = project_notice
     if supersede_ids:
         payload["supersedes"] = supersede_ids
     if task_key:
@@ -489,6 +497,9 @@ async def search_memory(
     # by ``user_id`` (hostname is write-path attribution only).
     if not project:
         return "Error: project not provided"
+    # Mesma chave da escrita: "PONTEIRO DE SPEC" acha o gravado como
+    # "PONTEIRO-DE-SPEC" (filtro estrito, hint, cache e auditoria).
+    project = normalize_project(project)
 
     started = time.perf_counter()
     try:
@@ -502,7 +513,11 @@ async def search_memory(
             # strict_project narrows to the project's configured family when there is
             # one: asking to stay "in this project" means the subject, not the single
             # repository the session happens to be rooted at.
-            scope = projects_in_group(project) if strict_project else []
+            scope = (
+                [normalize_project(p) for p in projects_in_group(project)]
+                if strict_project
+                else []
+            )
             return req_group, mem_client, scope
 
         requester_group, memory_client, strict_scope = await _run_blocking(
@@ -652,21 +667,31 @@ async def search_memory(
                 )
             )
 
-        # Reranking (opt-in) refines relevance over the candidate pool before the
-        # boosts are applied, so recency/project/group still have the final say.
-        def _sync_rerank_and_rank():
-            r_status = None
-            if rerank:
-                r_status = apply_rerank(query, results)
-            # Rank the whole candidate pool, THEN cut the page: recency/project/group
-            # boosts must be able to promote a candidate that missed the raw top-K.
+        def _rank(items):
             rank_search_results(
-                results,
+                items,
                 preferred_project=project,
                 requester_group=requester_group,
                 annotate=True,
                 query=query,
             )
+
+        def _sync_rerank_and_rank():
+            # Rank the whole candidate pool, THEN cut the page: recency/project/group
+            # boosts must be able to promote a candidate that missed the raw top-K.
+            _rank(results)
+            if not rerank:
+                return None
+            # Reranking (opt-in) rescores only the best MEM0_RERANKER_TOP_N of that
+            # blend (bounded CPU cost), then the head is blended again with the
+            # normalized rerank score so recency/project/group keep the final say.
+            # On any failure/timeout ``results`` is untouched (original order).
+            r_status = apply_rerank(query, results, page_size=DEFAULT_SEARCH_TOP_K)
+            if r_status.get("applied"):
+                head_size = r_status["reranked"]
+                head = results[:head_size]
+                _rank(head)
+                results[:head_size] = head
             return r_status
 
         rerank_status = await _run_blocking(_sync_rerank_and_rank)
@@ -693,7 +718,7 @@ async def list_memories(
     if not project:
         return "Error: project not provided"
 
-    project = project.strip()
+    project = normalize_project(project.strip())
     try:
         limit = int(limit)
     except (TypeError, ValueError):
@@ -1049,7 +1074,8 @@ async def create_spec_workspace(project_id: str, slug: str, name: str) -> str:
                 group_id = u.group_id if u else None
                 ws, created = get_or_create_workspace(
                     db, project_id=project_id, slug=slug, name=name,
-                    created_by=hostname, group_id=group_id
+                    created_by=hostname, group_id=group_id,
+                    created_by_email=resolve_spec_creator_email(db),
                 )
                 out = WorkspaceResponse.model_validate(ws).model_dump(mode="json")
                 out["created"] = created
@@ -1657,7 +1683,7 @@ async def create_task(
         return f"Error: {e}"
 
 
-@mcp.tool(description="Claim a task so you become its assignee and it moves to 'em_andamento'. On success the JSON includes kanban={column,label,means,do_now,next_column,next_action,pipeline,pipeline_rule} — you MUST follow do_now before advancing. IDEMPOTENT FOR YOU: if you are already the assignee, calling this again re-claims the card from ANY column and renews the lease — that is how you send a card back from revisao_codigo/fase_teste to em_andamento when a check failed, and how you renew a claim before it expires. It only fails by exclusivity when the card is active with a DIFFERENT assignee (claimed=false) — do NOT retry blindly. LEASE: a claim expires after a window of inactivity (SPEC_TASK_TIMEOUT_HOURS, default 24h) and the card returns to the backlog; the response carries claim_expires_at, and any action on the card (status change, edit, re-claim) renews it. Pipeline: em_andamento → revisao_codigo → fase_teste → concluido (never skip).")
+@mcp.tool(description="Claim a task so you become its assignee and it moves to 'em_andamento'. On success the JSON includes kanban={column,label,means,do_now,next_column,next_action,pipeline,pipeline_rule} — you MUST follow do_now before advancing. IDEMPOTENT FOR YOU: if you are already the assignee, calling this again re-claims the card from ANY column and renews the lease — that is how you send a card back from revisao_codigo/fase_teste to em_andamento when a check failed, and how you renew a claim before it expires. UNASSIGNED CARD OUTSIDE BACKLOG (e.g. created in PLANKA directly in revisao_codigo): claim assigns you and KEEPS the current column (status in the response). It only fails by exclusivity when the card is active with a DIFFERENT assignee (claimed=false) — do NOT retry blindly. LEASE: a claim expires after a window of inactivity (SPEC_TASK_TIMEOUT_HOURS, default 24h) and the card returns to the backlog; the response carries claim_expires_at, and any action on the card (status change, edit, re-claim) renews it. Pipeline: em_andamento → revisao_codigo → fase_teste → concluido (never skip).")
 async def claim_task(task_id: str) -> str:
     try:
         def _sync_op():
@@ -1681,21 +1707,36 @@ async def claim_task(task_id: str) -> str:
                     return f"Error: {he.detail}"
                 result = _claim_task(db, tid, claimant)
                 if result.claimed:
+                    # Adoção de card sem dono fora do backlog mantém a coluna.
+                    status_after = result.status or "em_andamento"
                     return json.dumps(
                         enrich_status_payload(
                             {
                                 "claimed": True,
                                 "assignee": claimant,
                                 "version": result.version,
-                                "status": "em_andamento",
+                                "status": status_after,
                                 # Prazo do lease: passado este ponto sem atividade, o
                                 # card volta ao backlog sozinho.
                                 "claim_expires_at": result.expires_at,
                             },
-                            "em_andamento",
+                            status_after,
                             db=db,
                         ),
                         default=str,
+                    )
+                if result.archived:
+                    return json.dumps(
+                        {
+                            "claimed": False,
+                            "archived": True,
+                            "current_assignee": result.current_assignee,
+                            "version": result.version,
+                            "message": (
+                                "Card arquivado — está fora do fluxo. Para retomá-lo, "
+                                "chame unarchive_task(task_id, expected_version) antes."
+                            ),
+                        }
                     )
                 return json.dumps(
                     {
@@ -1725,6 +1766,7 @@ async def release_task(task_id: str) -> str:
             from app.models import TaskCard
             from app.routers.specs import _assert_access
             from app.utils.kanban_pipeline import enrich_status_payload
+            from app.utils.task_lock import TaskStatusPolicyError
             from app.utils.task_lock import release_task as _release_task
         
             actor = resolve_hostname(user_id_var.get(None))
@@ -1738,7 +1780,12 @@ async def release_task(task_id: str) -> str:
                     _assert_access(db, task.workspace_id)
                 except HTTPException as he:
                     return f"Error: {he.detail}"
-                result = _release_task(db, tid, actor, reason="release via MCP")
+                try:
+                    result = _release_task(db, tid, actor, reason="release via MCP")
+                except TaskStatusPolicyError as exc:
+                    return json.dumps(
+                        {"policy": True, "code": exc.code, "message": exc.message}
+                    )
                 return json.dumps(
                     enrich_status_payload(
                         {"released": True, "version": result.version, "status": "tasks"},
@@ -1942,11 +1989,12 @@ async def get_task(task_id: str) -> str:
         return f"Error: {e}"
 
 
-@mcp.tool(description="List the task cards of a spec workspace, optionally filtered by Kanban column (tasks/em_andamento/revisao_codigo/fase_teste/concluido). This is how you go from a workspace to a claimable task_id without copying it from the web UI. Each item carries `version`, which update_task_status requires as expected_version — no extra read needed. Pass include_description=true to also get each card's body. Returns a JSON list; empty when there are none (never an error).")
+@mcp.tool(description="List the task cards of a spec workspace, optionally filtered by Kanban column (tasks/em_andamento/revisao_codigo/fase_teste/concluido). This is how you go from a workspace to a claimable task_id without copying it from the web UI. Each item carries `version`, which update_task_status requires as expected_version — no extra read needed. Pass include_description=true to also get each card's body. Archived cards (see archive_task) are hidden by default; pass include_archived=true to list them too (they carry archived_at). Returns a JSON list; empty when there are none (never an error).")
 async def list_tasks(
     workspace_id: str,
     status: str | None = None,
     include_description: bool = False,
+    include_archived: bool = False,
 ) -> str:
     try:
         def _sync_op():
@@ -1971,7 +2019,10 @@ async def list_tasks(
                         )
                 try:
                     tasks = _list_tasks_endpoint(
-                        uuid.UUID(workspace_id), status=status_enum, db=db
+                        uuid.UUID(workspace_id),
+                        status=status_enum,
+                        include_archived=include_archived,
+                        db=db,
                     )
                 except HTTPException as he:
                     return f"Error: {he.detail}"
@@ -2113,6 +2164,78 @@ async def delete_task(task_id: str) -> str:
     except Exception as e:  # noqa: BLE001
         logging.exception(e)
         return f"Error: {e}"
+
+
+async def _set_task_archived(
+    task_id: str, expected_version: int, *, archive: bool, reason: str | None = None
+) -> str:
+    try:
+        def _sync_op():
+            from fastapi import HTTPException
+
+            from app.models import TaskCard
+            from app.routers.specs import _assert_access
+            from app.utils.task_lock import TaskStatusPolicyError
+            from app.utils.task_lock import archive_task as _archive
+            from app.utils.task_lock import unarchive_task as _unarchive
+
+            actor = resolve_hostname(user_id_var.get(None))
+            db = SessionLocal()
+            try:
+                tid = uuid.UUID(task_id)
+                task = db.query(TaskCard).filter(TaskCard.id == tid).first()
+                if task is None:
+                    return f"Error: task {task_id} não encontrada"
+                try:
+                    _assert_access(db, task.workspace_id)
+                except HTTPException as he:
+                    return f"Error: {he.detail}"
+                try:
+                    if archive:
+                        result = _archive(db, tid, expected_version, actor, reason=reason)
+                    else:
+                        result = _unarchive(db, tid, expected_version, actor)
+                except TaskStatusPolicyError as exc:
+                    return json.dumps(
+                        {"policy": True, "code": exc.code, "message": exc.message}
+                    )
+                if result.conflict:
+                    return json.dumps(
+                        {
+                            "conflict": True,
+                            "expected_version": expected_version,
+                            "current_version": result.version,
+                            "archived_at": result.archived_at,
+                        },
+                        default=str,
+                    )
+                return json.dumps(
+                    {
+                        "archived": archive,
+                        "task_id": task_id,
+                        "version": result.version,
+                        "status": task.status.value,
+                        "archived_at": result.archived_at,
+                        "archived_by": result.archived_by,
+                    },
+                    default=str,
+                )
+            finally:
+                db.close()
+        return await _run_blocking(_sync_op)
+    except Exception as e:  # noqa: BLE001
+        logging.exception(e)
+        return f"Error: {e}"
+
+
+@mcp.tool(description="Archive a task card WITHOUT deleting anything — the non-destructive alternative to delete_task. Use it for a card that was worked on and then cancelled or became obsolete: it disappears from list_tasks and the board by default, but keeps its column, assignee, status history and comments (list_tasks(include_archived=true) shows it again, with archived_at). Prefer delete_task only for a card created by mistake. An archived card cannot be claimed or moved until unarchive_task. Pass expected_version; on a version conflict this returns {conflict: true, current_version} and changes NOTHING. A card active with ANOTHER assignee is refused (policy not_assignee). Optional reason is recorded in the audit log.")
+async def archive_task(task_id: str, expected_version: int, reason: str | None = None) -> str:
+    return await _set_task_archived(task_id, expected_version, archive=True, reason=reason)
+
+
+@mcp.tool(description="Undo archive_task: the card reappears in list_tasks and on the board in the same column it was in, with history and comments intact. Pass expected_version; on a version conflict this returns {conflict: true, current_version} and changes NOTHING.")
+async def unarchive_task(task_id: str, expected_version: int) -> str:
+    return await _set_task_archived(task_id, expected_version, archive=False)
 
 
 def _warn_invalid_mcp_hostname(raw_uid: str | None) -> None:

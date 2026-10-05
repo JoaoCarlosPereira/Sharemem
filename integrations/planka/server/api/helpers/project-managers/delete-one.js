@@ -3,6 +3,8 @@
  * Licensed under the Fair Use License: https://github.com/plankanban/planka/blob/master/LICENSE.md
  */
 
+const { isMem0BridgeActive } = require('../../../utils/mem0-group-scope');
+
 module.exports = {
   inputs: {
     record: {
@@ -49,7 +51,12 @@ module.exports = {
     const projectManager = await ProjectManager.qm.deleteOne(inputs.record.id);
 
     if (projectManager) {
-      if (inputs.user.role !== User.Roles.ADMIN || inputs.project.ownerProjectManagerId) {
+      // Mem0 Shared: com a ponte ativa ADMIN não tem visão total — expulsa da sala.
+      if (
+        inputs.user.role !== User.Roles.ADMIN ||
+        inputs.project.ownerProjectManagerId ||
+        isMem0BridgeActive()
+      ) {
         const boardIds = await sails.helpers.projects.getBoardIdsById(projectManager.projectId);
         const boardMemberships = await scoper.getBoardMembershipsForWholeProject();
 

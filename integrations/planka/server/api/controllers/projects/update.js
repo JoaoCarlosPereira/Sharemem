@@ -95,6 +95,10 @@
  */
 
 const { idInput } = require('../../../utils/inputs');
+const {
+  getGroupVisibleBoardMemberships,
+  hasAdminAccessToSharedProject,
+} = require('../../../utils/mem0-group-scope');
 
 const Errors = {
   NOT_ENOUGH_RIGHTS: {
@@ -216,7 +220,21 @@ module.exports = {
       currentUser.id,
     );
 
-    const availableInputKeys = ['id', 'isFavorite', 'isArchived', 'isCompleted'];
+    // Mem0 Shared: sem gerência nem atalho ADMIN, exige membership em board
+    // visível ao grupo; senão 404 (não vaza nome nem permite arquivar).
+    if (!projectManager && !hasAdminAccessToSharedProject(this.req, project)) {
+      const boardMemberships = await getGroupVisibleBoardMemberships(this.req, project.id);
+
+      if (boardMemberships.length === 0) {
+        throw Errors.PROJECT_NOT_FOUND; // Forbidden
+      }
+    }
+
+    const availableInputKeys = ['id', 'isFavorite'];
+    if (projectManager) {
+      availableInputKeys.push('isArchived', 'isCompleted');
+    }
+
     if (project.ownerProjectManagerId) {
       if (projectManager) {
         if (!_.isNil(inputs.ownerProjectManagerId)) {
@@ -225,7 +243,7 @@ module.exports = {
 
         availableInputKeys.push('ownerProjectManagerId', 'isHidden');
       }
-    } else if (currentUser.role === User.Roles.ADMIN) {
+    } else if (hasAdminAccessToSharedProject(this.req, project)) {
       availableInputKeys.push('ownerProjectManagerId', 'isHidden');
     } else if (projectManager) {
       availableInputKeys.push('isHidden');
@@ -269,22 +287,6 @@ module.exports = {
       }
 
       delete inputs.backgroundImageId; // eslint-disable-line no-param-reassign
-    }
-
-    if (!_.isUndefined(inputs.isFavorite)) {
-      if (currentUser.role !== User.Roles.ADMIN || project.ownerProjectManagerId) {
-        if (!projectManager) {
-          const boardMembershipsTotal =
-            await sails.helpers.projects.getBoardMembershipsTotalByIdAndUserId(
-              project.id,
-              currentUser.id,
-            );
-
-          if (boardMembershipsTotal === 0) {
-            throw Errors.PROJECT_NOT_FOUND; // Forbidden
-          }
-        }
-      }
     }
 
     const values = _.pick(inputs, [

@@ -49,8 +49,8 @@ export function RenameProjectDialog({
                 Digite o novo nome para o projeto <strong className="text-zinc-200">{currentName}</strong>.
               </p>
               <p>
-                Se o novo nome já existir, todas as memórias e atividades deste projeto serão 
-                <strong className="text-emerald-400"> mescladas</strong> para o projeto de destino e este deixará de existir.
+                Se o novo nome já existir, nada é movido agora: é criada uma
+                <strong className="text-emerald-400"> proposta de unificação</strong> que precisa ser aprovada em Governança.
               </p>
             </div>
           </AlertDialogDescription>

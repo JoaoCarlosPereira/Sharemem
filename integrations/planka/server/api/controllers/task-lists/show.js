@@ -52,6 +52,7 @@
  */
 
 const { idInput } = require('../../../utils/inputs');
+const { hasAdminAccessToSharedProject } = require('../../../utils/mem0-group-scope');
 
 const Errors = {
   TASK_LIST_NOT_FOUND: {
@@ -80,7 +81,7 @@ module.exports = {
       .getPathToProjectById(inputs.id)
       .intercept('pathNotFound', () => Errors.TASK_LIST_NOT_FOUND);
 
-    if (currentUser.role !== User.Roles.ADMIN || project.ownerProjectManagerId) {
+    if (!hasAdminAccessToSharedProject(this.req, project)) {
       const isProjectManager = await sails.helpers.users.isProjectManager(
         currentUser.id,
         project.id,

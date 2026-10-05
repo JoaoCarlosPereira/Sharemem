@@ -550,7 +550,7 @@ Esta seção registra o **alinhamento entre este documento (alvo) e o código re
 
 > **Atualização 2026-06-18 — esforço de prontidão para produção** (`.docs/tasks/prontidao-producao/`).
 > Fechou os gaps **D2, D3, D7, D8, D9** e adicionou gate de CI + backup/restore.
-> Runbooks: [backup-restore](runbooks/backup-restore.md), [auth-secrets](runbooks/auth-secrets.md), [governança](runbooks/governance.md), [incidente](runbooks/incident-diagnosis.md).
+> Runbooks: [backup-restore](runbooks/backup-restore.md), [auth-secrets](runbooks/auth-secrets.md), [governança](runbooks/governance.md), [incidente](runbooks/incident-diagnosis.md), [métricas Prometheus multiprocesso](runbooks/prometheus-metrics.md).
 
 | # | Item da arquitetura | Estado real | Situação |
 |---|---------------------|-------------|----------|

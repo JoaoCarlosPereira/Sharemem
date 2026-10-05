@@ -73,16 +73,10 @@ module.exports = {
       actorUser: inputs.actorUser,
     });
 
-    // Card membership requires board membership (no admin bypass).
+    // Card membership requires board membership (no admin bypass). Só board
+    // membership EDITOR: gerência de projeto vazaria boards de outros grupos.
     let boardMembership = await BoardMembership.qm.getOneByBoardIdAndUserId(board.id, user.id);
     if (!boardMembership) {
-      const existingPm = await ProjectManager.qm.getOneByProjectIdAndUserId(project.id, user.id);
-      if (!existingPm) {
-        await ProjectManager.qm.createOne({
-          projectId: project.id,
-          userId: user.id,
-        });
-      }
       boardMembership = await BoardMembership.qm.createOne({
         projectId: project.id,
         boardId: board.id,
@@ -97,10 +91,11 @@ module.exports = {
 
     // eslint-disable-next-line no-restricted-syntax
     for (const membership of existing || []) {
-      if (membership.userId === user.id) continue;
-      // eslint-disable-next-line no-await-in-loop
-      const deleted = await CardMembership.qm.deleteOne(membership.id);
-      if (deleted) broadcastDelete(deleted);
+      if (membership.userId !== user.id) {
+        // eslint-disable-next-line no-await-in-loop
+        const deleted = await CardMembership.qm.deleteOne(membership.id);
+        if (deleted) broadcastDelete(deleted);
+      }
     }
 
     const already = (existing || []).some((m) => m.userId === user.id);

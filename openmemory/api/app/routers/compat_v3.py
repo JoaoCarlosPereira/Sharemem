@@ -31,6 +31,7 @@ from app.utils.identity import resolve_hostname
 from app.utils.write_guard import check_write_allowed
 from app.utils.memory import get_memory_client
 from app.utils.partitioning import bind_active_collection
+from app.utils.project_name import normalize_project, normalize_project_with_notice
 from app.utils.read_audit import record_memory_reads
 from app.utils.read_cache import read_cache
 from app.utils.recency import extract_task_codes, rank_search_results
@@ -93,7 +94,8 @@ def _extract_scope(filters: Any) -> tuple[Optional[str], dict, bool, Optional[st
         if not isinstance(clause, dict):
             continue
         if clause.get("app_id"):
-            project = str(clause["app_id"])
+            # Mesma chave efetiva da escrita (whitespace interno -> '-').
+            project = normalize_project(str(clause["app_id"]))
         uid = clause.get("user_id")
         if uid == "*":
             is_global = True
@@ -167,7 +169,7 @@ def search(request: SearchRequest, http_request: Request) -> dict:
     elif requester_hostname is None:
         requester_hostname = request.user_id
     if project is None:
-        project = request.project
+        project = normalize_project(request.project)
     preferred_project = None if is_global else project
 
     # Grupo do solicitante: user_id nos filters (plugin) ou header legado → users.group_id.
@@ -350,8 +352,12 @@ async def add(request: AddRequest) -> dict:
     if not text:
         return {"status": "empty", "results": []}
 
-    project = request.app_id or "default"
+    # O SDK rejeita whitespace interno em ``project``; normaliza (caixa
+    # preservada) e devolve o projeto efetivo na resposta.
+    project, project_notice = normalize_project_with_notice(request.app_id or "default")
     metadata = dict(request.metadata or {})
+    if isinstance(metadata.get("project"), str):
+        metadata["project"] = normalize_project(metadata["project"])
     metadata.setdefault("project", project)
     metadata.setdefault("source_app", "openmemory")
     if request.user_id:
@@ -380,8 +386,11 @@ async def add(request: AddRequest) -> dict:
         return {"status": "error", "error": str(e), "results": []}
 
     results = result.get("results", []) if isinstance(result, dict) else []
-    return {"status": "ok", "event_id": (results[0].get("id") if results else None),
-            "results": results}
+    out = {"status": "ok", "event_id": (results[0].get("id") if results else None),
+           "results": results, "project": project}
+    if project_notice:
+        out["warning"] = project_notice
+    return out
 
 
 # --------------------------------------------------------------------------- #

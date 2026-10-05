@@ -477,6 +477,41 @@ class WriteAuditLog(Base):
     )
 
 
+class AutodedupReport(Base):
+    """One near-duplicate candidate seen by ``MEM0_AUTODEDUP_MODE=report``.
+
+    Report mode only *observes*: nothing here is ever applied to Qdrant. The rows
+    exist so the threshold can be calibrated from real traffic via
+    ``GET /admin/autodedup/report`` instead of scraping write-worker logs. Rows
+    with ``above_threshold = False`` are "near misses" (score between
+    ``MEM0_AUTODEDUP_REPORT_FLOOR`` and the threshold) recorded only to see what a
+    lower threshold would catch. Texts are short truncated excerpts, and the
+    table is pruned by retention (days + max rows) — see app.utils.autodedup_report.
+
+    Only report mode writes here, so there is no ``mode`` column. Indexes follow
+    the actual queries: ``created_at`` (retention + ``since``), ``score``
+    (``min_score``/ordering) and ``(project, created_at)`` (project filter; its
+    prefix already serves ``project`` alone). ``job_id`` is informational only.
+    """
+    __tablename__ = "autodedup_reports"
+    id = Column(UUID, primary_key=True, default=lambda: uuid.uuid4())
+    created_at = Column(DateTime, nullable=False, default=get_current_utc_time, index=True)
+    job_id = Column(String, nullable=True)
+    project = Column(String, nullable=True)
+    new_memory_id = Column(String, nullable=False)
+    duplicate_memory_id = Column(String, nullable=False)
+    duplicate_project = Column(String, nullable=True)
+    score = Column(sa.Float, nullable=False, index=True)
+    threshold = Column(sa.Float, nullable=False)
+    above_threshold = Column(Boolean, nullable=False, default=False)
+    new_text = Column(String, nullable=True)
+    duplicate_text = Column(String, nullable=True)
+
+    __table_args__ = (
+        Index('idx_autodedup_reports_project_time', 'project', 'created_at'),
+    )
+
+
 class GovernanceJob(Base):
     """Persistent governance job queue (Fase 3 / ADR-002).
 
@@ -506,6 +541,43 @@ class GovernanceJob(Base):
 
     __table_args__ = (
         Index("idx_governance_jobs_status_created", "status", "created_at"),
+    )
+
+
+class ProjectMergeProposal(Base):
+    """Proposta de unificação de projetos aguardando decisão de um admin.
+
+    Status: ``pending`` → ``approved`` | ``rejected``; ``approved`` → ``applied``
+    | ``failed``; ``failed`` pode ser aprovado de novo (retry). As transições são
+    feitas com ``UPDATE ... WHERE status = <esperado>`` para que duas decisões
+    concorrentes não vençam ao mesmo tempo.
+
+    ``undo_info`` guarda, por alias aplicado, o nome original, a contagem de
+    memórias movidas e os IDs de ``write_queue`` / ``write_audit_logs``
+    reapontados, para permitir desfazer manualmente.
+    """
+    __tablename__ = "project_merge_proposals"
+    id = Column(UUID, primary_key=True, default=lambda: uuid.uuid4())
+    canonical = Column(String, nullable=False, index=True)
+    aliases = Column(JSON, nullable=False, default=list)
+    confidence = Column(sa.Float, nullable=False, default=0.0)
+    reason = Column(Text, nullable=True)
+    status = Column(String(16), nullable=False, default="pending", index=True)
+    origin = Column(String(32), nullable=True)
+    source_job_id = Column(String, nullable=True)
+    apply_job_id = Column(String, nullable=True)
+    memory_counts = Column(JSON, nullable=True)
+    undo_info = Column(JSON, nullable=True)
+    decided_by = Column(String, nullable=True)
+    decided_at = Column(DateTime, nullable=True)
+    decision_note = Column(Text, nullable=True)
+    applied_at = Column(DateTime, nullable=True)
+    error = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=get_current_utc_time, index=True)
+    updated_at = Column(
+        DateTime,
+        default=get_current_utc_time,
+        onupdate=get_current_utc_time,
     )
 
 
@@ -695,6 +767,9 @@ class SpecWorkspace(Base):
         index=True,
     )
     created_by = Column(String, nullable=True)
+    # E-mail da pessoa criadora: só sessão JWT ou agent token com máquina
+    # vinculada ao dono (nunca ``legacy``). NULL = sem identidade verificada.
+    created_by_email = Column(String, nullable=True)
     created_at = Column(DateTime, default=get_current_utc_time, index=True)
     updated_at = Column(DateTime,
                         default=get_current_utc_time,
@@ -802,6 +877,11 @@ class TaskCard(Base):
     # Campos ricos do Kanban (kanban-planka / ADR-005) — Spec continua SoT.
     due_at = Column(DateTime, nullable=True, index=True)
     position = Column(sa.Float, nullable=False, default=65536.0, server_default="65536")
+    # Arquivamento não destrutivo (alternativa ao delete_task): o card sai da
+    # listagem padrão mas mantém coluna, histórico de status e comentários.
+    # ``archived_at`` nulo = card ativo. Ortogonal a ``status``.
+    archived_at = Column(DateTime, nullable=True, index=True)
+    archived_by = Column(String, nullable=True)
     created_at = Column(DateTime, default=get_current_utc_time, index=True)
     updated_at = Column(DateTime,
                         default=get_current_utc_time,

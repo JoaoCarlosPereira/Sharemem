@@ -3,7 +3,9 @@ import axios from 'axios';
 import { Memory, Client, Category } from '@/components/types';
 import { useDispatch, useSelector } from 'react-redux';
 import { AppDispatch, RootState } from '@/store/store';
-import { setAccessLogs, setMemoriesSuccess, setSelectedMemory, setRelatedMemories } from '@/store/memoriesSlice';
+import { setAccessLogMeta, setAccessLogs, setMemoriesSuccess, setSelectedMemory, setRelatedMemories } from '@/store/memoriesSlice';
+import type { AccessChannelFilter, AccessLogResponse } from '@/types/accessLog';
+import { toAccessLogMeta } from '@/lib/access-log';
 import { getApiUrl } from "@/lib/api-url";
 import { parseApiError } from "@/lib/api-errors";
 
@@ -54,22 +56,6 @@ interface ApiResponse {
   pages: number;
 }
 
-interface AccessLogEntry {
-  id: string;
-  app_name: string;
-  client_name?: string;
-  hostname?: string;
-  display_name?: string;
-  avatar_url?: string;
-  accessed_at: string;
-}
-
-interface AccessLogResponse {
-  total: number;
-  page: number;
-  page_size: number;
-  logs: AccessLogEntry[];
-}
 
 interface RelatedMemoryItem {
   id: string;
@@ -104,7 +90,12 @@ interface UseMemoriesApiReturn {
     }
   ) => Promise<{ memories: Memory[]; total: number; pages: number }>;
   fetchMemoryById: (memoryId: string) => Promise<void>;
-  fetchAccessLogs: (memoryId: string, page?: number, pageSize?: number) => Promise<void>;
+  fetchAccessLogs: (
+    memoryId: string,
+    page?: number,
+    pageSize?: number,
+    options?: { channel?: AccessChannelFilter | null; grouped?: boolean },
+  ) => Promise<void>;
   fetchRelatedMemories: (memoryId: string) => Promise<void>;
   createMemory: (text: string) => Promise<void>;
   deleteMemories: (memoryIds: string[]) => Promise<void>;
@@ -296,7 +287,12 @@ export const useMemoriesApi = (): UseMemoriesApiReturn => {
     }
   };
 
-  const fetchAccessLogs = async (memoryId: string, page: number = 1, pageSize: number = 10): Promise<void> => {
+  const fetchAccessLogs = async (
+    memoryId: string,
+    page: number = 1,
+    pageSize: number = 10,
+    options: { channel?: AccessChannelFilter | null; grouped?: boolean } = {},
+  ): Promise<void> => {
     if (memoryId === "") {
       return;
     }
@@ -304,10 +300,19 @@ export const useMemoriesApi = (): UseMemoriesApiReturn => {
     setError(null);
     try {
       const response = await axios.get<AccessLogResponse>(
-        `${getApiUrl()}/api/v1/memories/${memoryId}/access-log?page=${page}&page_size=${pageSize}`
+        `${getApiUrl()}/api/v1/memories/${memoryId}/access-log`,
+        {
+          params: {
+            page,
+            page_size: pageSize,
+            ...(options.channel ? { channel: options.channel } : {}),
+            ...(options.grouped === false ? { grouped: false } : {}),
+          },
+        },
       );
       setIsLoading(false);
       dispatch(setAccessLogs(response.data.logs));
+      dispatch(setAccessLogMeta(toAccessLogMeta(response.data)));
     } catch (err: any) {
       const errorMessage = err.message || 'Falha ao buscar logs de acesso';
       setError(errorMessage);

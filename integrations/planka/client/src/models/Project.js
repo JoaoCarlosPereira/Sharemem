@@ -112,7 +112,13 @@ export default class extends BaseModel {
           }
         }
 
-        Project.upsert(payload.project);
+        // Mem0 Shared: evento de projeto indisponível (ex.: outro grupo) não
+        // materializa o projeto na home. Exceção upstream: projeto recém
+        // compartilhado que o saga rebuscou (GET /projects/:id, já recortado
+        // por grupo no servidor) chega com `projectManagers`.
+        if (payload.isAvailable || payload.projectManagers) {
+          Project.upsert(payload.project);
+        }
 
         break;
       }

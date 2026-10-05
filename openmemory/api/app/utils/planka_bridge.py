@@ -215,6 +215,12 @@ def apply_planka_card_move(
     if task is None:
         raise PlankaBridgeError(404, "task_missing", "Task Spec ausente para card PLANKA")
 
+    if task.archived_at is not None:
+        # Card arquivado não deveria estar no PLANKA (o espelho o remove); se
+        # sobrou por falha do espelho, o movimento é ignorado em vez de
+        # reativar o card sem unarchive_task.
+        return {"applied": False, "reason": "archived", "task_id": str(task.id)}
+
     actor_id = (actor or "").strip() or "ui-user"
     current = task.status.value if hasattr(task.status, "value") else str(task.status)
 

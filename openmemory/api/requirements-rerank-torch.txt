@@ -1,0 +1,10 @@
+# Torch CPU-only do rerank local OPCIONAL (card 80110071). Instalado ANTES de
+# requirements-rerank.txt, num passo proprio, so com --build-arg INSTALL_RERANK=1
+# (ver api/Dockerfile e docs/runbooks/rerank.md).
+#
+# --index-url (e NAO --extra-index-url): com o PyPI tambem no ar, o pip podia
+# escolher o wheel CUDA (~2 GB de libs nvidia) quando a versao +cpu nao existia
+# para a plataforma/Python ou era mais antiga. Aqui o unico indice e o CPU da
+# PyTorch (que tambem espelha as deps do torch), entao nao ha wheel CUDA possivel.
+--index-url https://download.pytorch.org/whl/cpu
+torch>=2.4.0,<3

@@ -13,9 +13,10 @@ import {
   selectProjectsSearch,
 } from './core';
 import { isLocalId } from '../utils/local-id';
+import groupProjectsForHome from '../utils/group-projects-for-home';
 import { isUserAdminOrProjectOwner } from '../utils/record-helpers';
 import { STATIC_USER_BY_ID } from '../constants/StaticUsers';
-import { BoardMembershipRoles, ProjectGroups, ProjectOrders } from '../constants/Enums';
+import { BoardMembershipRoles, ProjectOrders } from '../constants/Enums';
 
 const ORDER_BY_ARGS_BY_PROJECTS_ORDER = {
   [ProjectOrders.ALPHABETICALLY]: [['name', 'id.length', 'id']],
@@ -124,13 +125,17 @@ export const selectFilteredProjectIdsForCurrentUser = createSelector(
   },
 );
 
+const selectIsMem0SharedMode = ({ common: { bootstrap } }) =>
+  !!(bootstrap && bootstrap.isMem0Shared);
+
 export const selectFilteredProjctIdsByGroupForCurrentUser = createSelector(
   orm,
   (state) => selectCurrentUserId(state),
   (state) => selectProjectsSearch(state),
   (state) => selectIsHiddenProjectsVisible(state),
   (state) => selectProjectsOrder(state),
-  ({ User }, id, projectsSearch, isHiddenProjectsVisible, projectsOrder) => {
+  (state) => selectIsMem0SharedMode(state),
+  ({ User }, id, projectsSearch, isHiddenProjectsVisible, projectsOrder, isMem0Shared) => {
     if (!id) {
       return id;
     }
@@ -141,45 +146,13 @@ export const selectFilteredProjctIdsByGroupForCurrentUser = createSelector(
       return userModel;
     }
 
-    const { managerProjectModels, membershipProjectModels, adminProjectModels } =
+    return groupProjectsForHome(
       userModel.getFilteredSeparatedProjectsModelArray(
         projectsSearch,
         isHiddenProjectsVisible,
         ORDER_BY_ARGS_BY_PROJECTS_ORDER[projectsOrder],
-      );
-
-    return managerProjectModels.reduce(
-      (result, projectModel) => {
-        const group = projectModel.ownerProjectManager ? ProjectGroups.MY_OWN : ProjectGroups.TEAM;
-
-        result[group].push(projectModel.id);
-
-        // Mem0 Shared: kanban-archive-lifecycle — sub-particiona o grupo TEAM
-        // por isArchived/isCompleted na mesma passada, para a home separar em
-        // três seções (ativos / concluídos / arquivados) sem nova travessia.
-        if (group === ProjectGroups.TEAM) {
-          if (projectModel.isArchived) {
-            result.teamArchivedIds.push(projectModel.id);
-          } else if (projectModel.isCompleted) {
-            result.teamCompletedIds.push(projectModel.id);
-          } else {
-            result.teamActiveIds.push(projectModel.id);
-          }
-        }
-
-        return result;
-      },
-      {
-        [ProjectGroups.MY_OWN]: [],
-        [ProjectGroups.TEAM]: [],
-        [ProjectGroups.SHARED_WITH_ME]: membershipProjectModels.map(
-          (projectModel) => projectModel.id,
-        ),
-        [ProjectGroups.OTHERS]: adminProjectModels.map((projectModel) => projectModel.id),
-        teamActiveIds: [],
-        teamCompletedIds: [],
-        teamArchivedIds: [],
-      },
+      ),
+      { isMem0Shared },
     );
   },
 );

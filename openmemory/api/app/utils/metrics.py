@@ -1,17 +1,56 @@
-"""Prometheus metric definitions shared across API and workers."""
+"""Prometheus metric definitions shared across API and workers.
+
+Modo multiprocesso (``PROMETHEUS_MULTIPROC_DIR``, ver
+``app/utils/prometheus_multiproc.py``): Counters e Histograms são somados entre
+processos automaticamente; cada Gauge declara ``multiprocess_mode`` explícito
+para que a agregação faça sentido e **não** ganhe o label ``pid`` (o default
+``all`` exporia uma série por PID e quebraria alertas como
+``write_queue_depth > 100``). Critério usado:
+
+* ``livemostrecent`` — snapshot de estado atual publicado periodicamente por um
+  loop vivo (profundidade de filas): vale o valor mais recente de um processo
+  ainda vivo; ao encerrar, o processo some do agregado.
+* ``mostrecent`` — snapshot calculado sob demanda (admin/sizes, governança,
+  avaliação de qualidade, duração do último backup): vale o último ``set`` de
+  qualquer processo, inclusive de um worker já reciclado.
+* ``max`` — timestamp monotônico (último backup com sucesso).
+* ``sum`` — gauge alterado por ``inc()`` (``mostrecent`` não aceita ``inc``):
+  soma das contribuições de todos os processos desde o start do container.
+
+Sem a variável os modos são ignorados (registry em memória por processo).
+"""
 
 from prometheus_client import Counter, Gauge, Histogram
+
+from app.utils.prometheus_multiproc import install_exit_hook
+
+# Remove arquivos de Gauges ``live*`` deste PID ao sair (no-op sem multiproc).
+install_exit_hook()
 
 SEARCH_LATENCY = Histogram(
     "mcp_search_latency_seconds",
     "Latency of MCP search_memory calls",
     buckets=(0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0),
 )
+# Rerank opcional (card 80110071): so recebe amostras com MEM0_RERANKER_PROVIDER.
+RERANK_LATENCY = Histogram(
+    "mcp_rerank_latency_seconds",
+    "Latency of the cross-encoder rerank pass inside search_memory",
+    buckets=(0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0),
+)
+RERANK_OUTCOME = Counter(
+    "mcp_rerank_total",
+    "Rerank attempts by outcome (applied|timeout|failed|busy|circuit_open|loading|unavailable)",
+    ["outcome"],
+)
 EMBED_CACHE_HIT = Counter("embed_cache_hit_total", "Embedding cache hits")
 EMBED_CACHE_MISS = Counter("embed_cache_miss_total", "Embedding cache misses")
 SEARCH_CACHE_HIT = Counter("search_cache_hit_total", "Search result cache hits")
 SEARCH_CACHE_MISS = Counter("search_cache_miss_total", "Search result cache misses")
-WRITE_QUEUE_DEPTH = Gauge("write_queue_depth", "Pending write queue jobs")
+WRITE_QUEUE_DEPTH = Gauge(
+    "write_queue_depth", "Pending write queue jobs",
+    multiprocess_mode="livemostrecent",
+)
 WRITE_WORKER_ERRORS = Counter("write_worker_error_total", "Write worker processing errors")
 WRITE_WORKER_SUCCESS = Counter("write_worker_success_total", "Write worker successful jobs")
 # Fase 2 (task_05): replication failures while dual-writing to the migration
@@ -20,12 +59,19 @@ DUAL_WRITE_ERRORS = Counter("dual_write_error_total", "Dual-write replication fa
 # Fase 2 (task_06/task_09): monotonic count of points copied by the migration worker.
 MIGRATION_POINTS_COPIED = Counter("migration_points_copied_total", "Points copied to the migration target collection")
 # Fase 2 (task_09): per-project size and how many projects exceed the promotion threshold.
-PROJECT_MEMORY_COUNT = Gauge("project_memory_count", "Cataloged memory count per project", ["project"])
-PROJECT_SIZE_OVER_THRESHOLD = Gauge("project_size_over_threshold", "Number of projects over the promotion threshold")
+PROJECT_MEMORY_COUNT = Gauge(
+    "project_memory_count", "Cataloged memory count per project", ["project"],
+    multiprocess_mode="mostrecent",
+)
+PROJECT_SIZE_OVER_THRESHOLD = Gauge(
+    "project_size_over_threshold", "Number of projects over the promotion threshold",
+    multiprocess_mode="mostrecent",
+)
 
 # Fase 3 governance metrics
 GOVERNANCE_JOB_QUEUE_DEPTH = Gauge(
-    "governance_job_queue_depth", "Pending governance jobs", ["job_type"]
+    "governance_job_queue_depth", "Pending governance jobs", ["job_type"],
+    multiprocess_mode="livemostrecent",
 )
 GOVERNANCE_JOB_LATENCY = Histogram(
     "governance_job_latency_seconds",
@@ -48,7 +94,8 @@ GOVERNANCE_QUOTA_ENFORCED_TOTAL = Counter(
     "governance_quota_enforced_total", "Memories quarantined by quota enforcement"
 )
 GOVERNANCE_QUOTA_OVER_LIMIT_PROJECTS = Gauge(
-    "governance_quota_over_limit_projects", "Projects currently over their max_memories"
+    "governance_quota_over_limit_projects", "Projects currently over their max_memories",
+    multiprocess_mode="mostrecent",
 )
 # Prontidão produção (task_07 / ADR-003): arquivamento de projects inativos.
 GOVERNANCE_COLD_TIER_ARCHIVED_TOTAL = Counter(
@@ -56,9 +103,13 @@ GOVERNANCE_COLD_TIER_ARCHIVED_TOTAL = Counter(
 )
 # Prontidão produção (task_02 / ADR-003): backup para object store (MinIO/S3).
 BACKUP_LAST_SUCCESS_TIMESTAMP = Gauge(
-    "backup_last_success_timestamp", "Unix timestamp of the last successful backup"
+    "backup_last_success_timestamp", "Unix timestamp of the last successful backup",
+    multiprocess_mode="max",
 )
-BACKUP_DURATION_SECONDS = Gauge("backup_duration_seconds", "Duration of the last backup run")
+BACKUP_DURATION_SECONDS = Gauge(
+    "backup_duration_seconds", "Duration of the last backup run",
+    multiprocess_mode="mostrecent",
+)
 BACKUP_ERRORS_TOTAL = Counter("backup_errors_total", "Backup run failures")
 # Prontidão produção (task_11 / ADR-006): autenticação por equipe na borda.
 AUTH_DENIED_TOTAL = Counter("auth_denied_total", "Requests with missing/invalid team token", ["mode"])
@@ -81,12 +132,33 @@ ONBOARDING_SUBMIT_TOTAL = Counter(
 
 GOVERNANCE_REVERTED_TOTAL = Counter("governance_reverted_total", "Governance quarantines reverted")
 GOVERNANCE_QUARANTINED_CURRENT = Gauge(
-    "governance_quarantined_current", "Memories currently in quarantine"
+    "governance_quarantined_current", "Memories currently in quarantine",
+    multiprocess_mode="sum",
 )
 GOVERNANCE_REVERT_RATE = Gauge(
-    "governance_revert_rate", "Ratio of reverts to governance actions", ["job_type"]
+    "governance_revert_rate", "Ratio of reverts to governance actions", ["job_type"],
+    multiprocess_mode="mostrecent",
 )
 RETRIEVAL_DUPLICATE_IN_TOPK_RATIO = Gauge(
-    "retrieval_duplicate_in_topk_ratio", "Proxy duplicate ratio in search top-K"
+    "retrieval_duplicate_in_topk_ratio", "Proxy duplicate ratio in search top-K",
+    multiprocess_mode="mostrecent",
 )
-RETRIEVAL_QUALITY_INDEX = Gauge("retrieval_quality_index", "LLM-judge retrieval quality index")
+RETRIEVAL_QUALITY_INDEX = Gauge(
+    "retrieval_quality_index", "LLM-judge retrieval quality index",
+    multiprocess_mode="mostrecent",
+)
+# Project merge consistency (SQL-first + Qdrant compensation).
+PROJECT_MERGE_COMPENSATION_FAILURES = Counter(
+    "project_merge_compensation_failures_total",
+    "Qdrant points whose payload.project could not be reverted after a failed merge",
+)
+PROJECT_MERGE_INCONSISTENT_PROJECTS = Gauge(
+    "project_merge_inconsistent_projects",
+    "Projects with 0 Qdrant points but SQL references (possible half-applied merge)",
+    multiprocess_mode="mostrecent",
+)
+PROJECT_MERGE_PENDING_PROPOSALS = Gauge(
+    "project_merge_pending_proposals",
+    "Project merge proposals awaiting admin approval",
+    multiprocess_mode="mostrecent",
+)
