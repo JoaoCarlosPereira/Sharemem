@@ -767,6 +767,9 @@ class SpecWorkspace(Base):
         index=True,
     )
     created_by = Column(String, nullable=True)
+    # E-mail da pessoa criadora: só sessão JWT ou agent token com máquina
+    # vinculada ao dono (nunca ``legacy``). NULL = sem identidade verificada.
+    created_by_email = Column(String, nullable=True)
     created_at = Column(DateTime, default=get_current_utc_time, index=True)
     updated_at = Column(DateTime,
                         default=get_current_utc_time,

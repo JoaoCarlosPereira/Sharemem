@@ -25,6 +25,7 @@ export interface Workspace {
   name: string;
   status: SpecWorkspaceStatus;
   created_by?: string | null;
+  created_by_email?: string | null;
   created_at?: string | null;
   updated_at?: string | null;
 }

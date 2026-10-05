@@ -104,6 +104,9 @@ const { idInput } = require('../../../utils/inputs');
 const filterBoardsByGroup = require('../../../utils/filter-boards-by-group');
 const getBoardGroupIds = require('../../../utils/get-board-group-ids');
 const getGroupVisibilityUserIds = require('../../../utils/get-group-visibility-user-ids');
+const filterProjectsByVisibleBoards = require('../../../utils/filter-projects-by-visible-boards');
+const { getMappedProjectIds } = require('../../../utils/mem0-shared-access');
+const { hasAdminAccessToSharedProject } = require('../../../utils/mem0-group-scope');
 
 const Errors = {
   PROJECT_NOT_FOUND: {
@@ -142,7 +145,7 @@ module.exports = {
     );
 
     let boards;
-    if (currentUser.role !== User.Roles.ADMIN || project.ownerProjectManagerId) {
+    if (!hasAdminAccessToSharedProject(this.req, project)) {
       if (!isProjectManager) {
         if (boardMemberships.length === 0) {
           throw Errors.PROJECT_NOT_FOUND; // Forbidden
@@ -158,18 +161,18 @@ module.exports = {
     }
 
     const legacySharedMode = this.req.mem0Auth && this.req.mem0Auth.group === '*';
-    if (boards.length > 0 && currentUser.email && !legacySharedMode) {
+    if (currentUser.email && !legacySharedMode) {
+      const runQuery = (sql, values) => sails.sendNativeQuery(sql, values);
+      const allBoards = boards;
+      let isVisible = false;
       try {
         const groupVisibilityUserIds = await getGroupVisibilityUserIds(
-          (sql, values) => sails.sendNativeQuery(sql, values),
+          runQuery,
           currentUser,
           this.req.mem0Auth && this.req.mem0Auth.group,
         );
         if (groupVisibilityUserIds) {
-          const boardGroupIds = await getBoardGroupIds(
-            (sql, values) => sails.sendNativeQuery(sql, values),
-            boards,
-          );
+          const boardGroupIds = await getBoardGroupIds(runQuery, boards);
           boards = filterBoardsByGroup(
             boards,
             [...groupVisibilityUserIds.sameGroupUserIds, currentUser.id],
@@ -180,10 +183,30 @@ module.exports = {
               restrictUnknownCreators: groupVisibilityUserIds.restrictUnknownCreators,
             },
           );
+          // Mem0 Shared: projeto sem board visível = 404 (não vaza nome/gerentes).
+          const mappedProjectIds = await getMappedProjectIds(runQuery, [project.id]);
+          const managers = await ProjectManager.qm.getByProjectId(project.id);
+          isVisible =
+            filterProjectsByVisibleBoards([project], {
+              allBoards,
+              visibleBoards: boards,
+              currentUserId: currentUser.id,
+              managerProjectIds: isProjectManager ? [project.id] : [],
+              projectManagers: managers,
+              sameGroupUserIds: groupVisibilityUserIds.sameGroupUserIds,
+              groupedUserIds: groupVisibilityUserIds.groupedUserIds,
+              mappedProjectIds,
+            }).length > 0;
+        } else {
+          isVisible = true;
         }
       } catch (error) {
         sails.log.warn('projects/show: failed to resolve current user group:', error.message);
-        boards = [];
+        isVisible = false;
+      }
+
+      if (!isVisible) {
+        throw Errors.PROJECT_NOT_FOUND;
       }
     }
 

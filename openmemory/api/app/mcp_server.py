@@ -56,6 +56,7 @@ from app.utils.project_groups import projects_in_group
 from app.utils.project_name import normalize_project, normalize_project_with_notice
 from app.utils.recency import rank_search_results
 from app.utils.scope_keys import normalize_task, resolve_task
+from app.utils.spec_auth import resolve_spec_creator_email
 from app.utils.reranking import apply_rerank
 from app.utils.token_usage_wrapper import usage_attribution
 from app.utils.write_guard import check_write_allowed
@@ -1073,7 +1074,8 @@ async def create_spec_workspace(project_id: str, slug: str, name: str) -> str:
                 group_id = u.group_id if u else None
                 ws, created = get_or_create_workspace(
                     db, project_id=project_id, slug=slug, name=name,
-                    created_by=hostname, group_id=group_id
+                    created_by=hostname, group_id=group_id,
+                    created_by_email=resolve_spec_creator_email(db),
                 )
                 out = WorkspaceResponse.model_validate(ws).model_dump(mode="json")
                 out["created"] = created

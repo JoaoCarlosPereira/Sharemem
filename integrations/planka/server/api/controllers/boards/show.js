@@ -154,6 +154,7 @@ const { idInput } = require('../../../utils/inputs');
 const getBoardGroupIds = require('../../../utils/get-board-group-ids');
 const filterBoardsByGroup = require('../../../utils/filter-boards-by-group');
 const getGroupVisibilityUserIds = require('../../../utils/get-group-visibility-user-ids');
+const { hasAdminAccessToSharedProject } = require('../../../utils/mem0-group-scope');
 
 const Errors = {
   BOARD_NOT_FOUND: {
@@ -220,7 +221,7 @@ module.exports = {
       }
     }
 
-    if (currentUser.role !== User.Roles.ADMIN || project.ownerProjectManagerId) {
+    if (!hasAdminAccessToSharedProject(this.req, project)) {
       const isProjectManager = await sails.helpers.users.isProjectManager(
         currentUser.id,
         project.id,

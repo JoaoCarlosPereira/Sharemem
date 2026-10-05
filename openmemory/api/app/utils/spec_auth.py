@@ -79,3 +79,51 @@ def resolve_spec_actor(
     if body_actor and str(body_actor).strip():
         return resolve_hostname(str(body_actor).strip())
     return None
+
+
+def _email_of_user_id(db: Any, raw_user_id: str) -> Optional[str]:
+    try:
+        from app.models import User
+
+        user = db.query(User).filter(User.id == UUID(raw_user_id)).first()
+    except (TypeError, ValueError):
+        return None
+    email = (getattr(user, "email", None) or "").strip() if user is not None else ""
+    return email or None
+
+
+def resolve_spec_creator_email(db: Any | None = None) -> Optional[str]:
+    """E-mail autenticado da pessoa criadora, ou ``None``.
+
+    Só identidade verificada: sessão JWT, ou agent token cuja máquina está
+    ``linked`` ao dono do token. ``legacy`` nunca atribui (hostname do path
+    MCP é forjável). Nunca levanta.
+    """
+    method = (auth_method_var.get() or "").strip()
+    raw_user_id = (auth_user_var.get() or "").strip()
+
+    if method == "session":
+        email = (auth_email_var.get() or "").strip()
+        if email:
+            return email
+        return _email_of_user_id(db, raw_user_id) if raw_user_id and db is not None else None
+
+    if method != "agent_token" or not raw_user_id or db is None:
+        return None
+    bound = (machine_var.get() or "").strip()
+    if not bound:
+        return None
+    try:
+        from app.models import MachineStatus
+        from app.utils.machine_resolver import find_machine
+
+        machine = find_machine(db, bound)
+        if (
+            machine is None
+            or machine.status != MachineStatus.linked
+            or str(machine.linked_user_id) != str(UUID(raw_user_id))
+        ):
+            return None
+    except Exception:  # noqa: BLE001 — atribuição é best-effort
+        return None
+    return _email_of_user_id(db, raw_user_id)
