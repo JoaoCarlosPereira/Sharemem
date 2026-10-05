@@ -323,7 +323,10 @@ class TestScript:
             cal.build_backends({"vector_store": {"provider": "qdrant", "config": {"path": "/tmp/x"}},
                                 "embedder": {"provider": "ollama", "config": {}}})
 
-    def test_build_backends_recusa_outro_vector_store(self):
+    def test_build_backends_recusa_outro_vector_store(self, monkeypatch):
+        # Isola do .env local: com MEM0_LOCAL_ONLY=1 a checagem do embedder
+        # dispara antes da do vector store.
+        monkeypatch.delenv("MEM0_LOCAL_ONLY", raising=False)
         with pytest.raises(RuntimeError, match="Qdrant"):
             cal.build_backends({"vector_store": {"provider": "chroma", "config": {}}})
 

@@ -690,5 +690,9 @@ class TestMigration:
             "script_location", str(Path(__file__).resolve().parents[1] / "alembic")
         )
         script = ScriptDirectory.from_config(cfg)
-        assert script.get_heads() == ["s1t2u3v4w5x6"]
+        heads = script.get_heads()
+        assert len(heads) == 1, heads
         assert script.get_revision("s1t2u3v4w5x6").down_revision == "r0s1t2u3v4w5"
+        # A migration faz parte da cadeia do head único (direta ou via merge revision).
+        ancestors = {rev.revision for rev in script.iterate_revisions(heads[0], "base")}
+        assert "s1t2u3v4w5x6" in ancestors
