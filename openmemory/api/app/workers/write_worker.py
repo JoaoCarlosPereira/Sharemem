@@ -38,6 +38,7 @@ from app.utils.metrics import (
     WRITE_WORKER_ERRORS,
     WRITE_WORKER_SUCCESS,
 )
+from app.utils.project_name import normalize_project
 from app.utils.projects import upsert_project as _default_upsert_project
 from app.utils.read_cache import read_cache
 from app.utils.scope_keys import resolve_task
@@ -293,6 +294,20 @@ class WriteWorker:
 
     async def _process_job_body(self, job: WriteJob) -> None:
         """Inner job work (timeout-wrapped by :meth:`_process_job`)."""
+        # Defensivo: jobs enfileirados antes da normalizacao na entrada podem
+        # trazer ``project`` com espaco interno, que o SDK rejeita (ValueError)
+        # e faria o job falhar apos todas as tentativas. Normaliza a chave em
+        # memoria (a linha da fila nao e reescrita) para que add, catalogo,
+        # invalidacao de cache e atribuicao usem a mesma chave efetiva.
+        effective_project = normalize_project(job.project)
+        if effective_project and effective_project != job.project:
+            logger.info(
+                "write job project normalized job_id=%s project=%r -> %r",
+                job.id,
+                job.project,
+                effective_project,
+            )
+            job.project = effective_project
         client = self._client_provider()
         if client is None:
             raise RuntimeError("memory client unavailable (LLM/backend down)")

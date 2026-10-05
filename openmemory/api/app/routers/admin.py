@@ -269,6 +269,9 @@ def project_memories(
     if client is None:
         raise HTTPException(status_code=503, detail="Memory system unavailable")
 
+    from app.utils.project_name import normalize_project
+
+    project = normalize_project(project)
     filters = {"project": project}
     try:
         if search:

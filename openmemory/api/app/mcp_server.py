@@ -53,6 +53,7 @@ from app.utils.partitioning import bind_active_collection
 from app.utils.permissions import check_memory_access_permissions
 from app.utils.read_cache import read_cache
 from app.utils.project_groups import projects_in_group
+from app.utils.project_name import normalize_project, normalize_project_with_notice
 from app.utils.recency import rank_search_results
 from app.utils.scope_keys import normalize_task, resolve_task
 from app.utils.reranking import apply_rerank
@@ -225,7 +226,10 @@ async def add_memories(
         )
         return blocked
 
-    project = project.strip()
+    # Chave efetiva: o SDK rejeita whitespace interno no worker (job falhava em
+    # silencio depois do ack). Normaliza aqui e informa o projeto efetivo.
+    original_project = project.strip()
+    project, project_notice = normalize_project_with_notice(project)
     supersede_ids: list[str] = []
     if supersedes:
         for mid in supersedes:
@@ -299,6 +303,9 @@ async def add_memories(
         ),
         "project": project,
     }
+    if project_notice:
+        payload["project_requested"] = original_project
+        payload["warning"] = project_notice
     if supersede_ids:
         payload["supersedes"] = supersede_ids
     if task_key:
@@ -489,6 +496,9 @@ async def search_memory(
     # by ``user_id`` (hostname is write-path attribution only).
     if not project:
         return "Error: project not provided"
+    # Mesma chave da escrita: "PONTEIRO DE SPEC" acha o gravado como
+    # "PONTEIRO-DE-SPEC" (filtro estrito, hint, cache e auditoria).
+    project = normalize_project(project)
 
     started = time.perf_counter()
     try:
@@ -502,7 +512,11 @@ async def search_memory(
             # strict_project narrows to the project's configured family when there is
             # one: asking to stay "in this project" means the subject, not the single
             # repository the session happens to be rooted at.
-            scope = projects_in_group(project) if strict_project else []
+            scope = (
+                [normalize_project(p) for p in projects_in_group(project)]
+                if strict_project
+                else []
+            )
             return req_group, mem_client, scope
 
         requester_group, memory_client, strict_scope = await _run_blocking(
@@ -693,7 +707,7 @@ async def list_memories(
     if not project:
         return "Error: project not provided"
 
-    project = project.strip()
+    project = normalize_project(project.strip())
     try:
         limit = int(limit)
     except (TypeError, ValueError):
