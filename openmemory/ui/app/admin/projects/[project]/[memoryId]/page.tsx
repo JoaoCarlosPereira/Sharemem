@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useRef, useState } from "react";
+import { useApiSessionSettled } from "@/hooks/useApiSessionReady";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useSelector } from "react-redux";
@@ -10,7 +11,12 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ArrowLeft } from "lucide-react";
 import { resolveAttribution } from "@/lib/attribution";
-import { formatDateTime } from "@/lib/i18n/pt-BR";
+import { AccessLogEntryView } from "@/components/shared/access-log-entry";
+import {
+  AccessLogFilter,
+  AccessLogPartialNotice,
+  type AccessLogFilterValue,
+} from "@/components/shared/access-log-filter";
 
 export default function AdminMemoryDetailPage() {
   const params = useParams<{ project: string; memoryId: string }>();
@@ -23,12 +29,27 @@ export default function AdminMemoryDetailPage() {
   const accessLogs = useSelector(
     (state: RootState) => state.memories.accessLogs,
   );
+  const accessLogMeta = useSelector(
+    (state: RootState) => state.memories.accessLogMeta,
+  );
+  const [channel, setChannel] = useState<AccessLogFilterValue>(null);
+
+  const sessionSettled = useApiSessionSettled();
+  // Uma leitura auditada por abertura, só com a sessão decidida (Bearer anexado).
+  const fetchedId = useRef<string | null>(null);
 
   useEffect(() => {
+    if (!sessionSettled || fetchedId.current === memoryId) return;
+    fetchedId.current = memoryId;
     fetchMemoryById(memoryId).catch(() => {});
-    fetchAccessLogs(memoryId).catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [memoryId]);
+  }, [memoryId, sessionSettled]);
+
+  useEffect(() => {
+    if (!sessionSettled) return;
+    fetchAccessLogs(memoryId, 1, 20, { channel }).catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [memoryId, channel, sessionSettled]);
 
   return (
     <div className="max-w-3xl">
@@ -80,25 +101,23 @@ export default function AdminMemoryDetailPage() {
           </Card>
 
           <Card className="border-zinc-800 bg-zinc-900">
-            <CardHeader>
+            <CardHeader className="space-y-2">
               <CardTitle className="text-zinc-100">Últimos acessos</CardTitle>
+              <AccessLogFilter
+                value={channel}
+                meta={accessLogMeta}
+                onChange={setChannel}
+              />
+              <AccessLogPartialNotice meta={accessLogMeta} />
             </CardHeader>
             <CardContent className="text-sm text-zinc-400">
               {accessLogs.length === 0 ? (
                 <span className="text-zinc-600">Nenhum acesso registrado</span>
               ) : (
-                <ul className="space-y-1">
+                <ul className="space-y-3">
                   {accessLogs.map((log) => (
                     <li key={log.id}>
-                      {log.display_name ||
-                        resolveAttribution({
-                          appName: log.app_name,
-                          clientName: log.client_name,
-                          hostname: log.hostname,
-                          displayName: log.display_name,
-                          avatarUrl: log.avatar_url,
-                        }).label}{" "}
-                      — {formatDateTime(log.accessed_at)}
+                      <AccessLogEntryView entry={log} variant="compact" />
                     </li>
                   ))}
                 </ul>
