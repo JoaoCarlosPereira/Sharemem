@@ -1681,7 +1681,7 @@ async def create_task(
         return f"Error: {e}"
 
 
-@mcp.tool(description="Claim a task so you become its assignee and it moves to 'em_andamento'. On success the JSON includes kanban={column,label,means,do_now,next_column,next_action,pipeline,pipeline_rule} — you MUST follow do_now before advancing. IDEMPOTENT FOR YOU: if you are already the assignee, calling this again re-claims the card from ANY column and renews the lease — that is how you send a card back from revisao_codigo/fase_teste to em_andamento when a check failed, and how you renew a claim before it expires. It only fails by exclusivity when the card is active with a DIFFERENT assignee (claimed=false) — do NOT retry blindly. LEASE: a claim expires after a window of inactivity (SPEC_TASK_TIMEOUT_HOURS, default 24h) and the card returns to the backlog; the response carries claim_expires_at, and any action on the card (status change, edit, re-claim) renews it. Pipeline: em_andamento → revisao_codigo → fase_teste → concluido (never skip).")
+@mcp.tool(description="Claim a task so you become its assignee and it moves to 'em_andamento'. On success the JSON includes kanban={column,label,means,do_now,next_column,next_action,pipeline,pipeline_rule} — you MUST follow do_now before advancing. IDEMPOTENT FOR YOU: if you are already the assignee, calling this again re-claims the card from ANY column and renews the lease — that is how you send a card back from revisao_codigo/fase_teste to em_andamento when a check failed, and how you renew a claim before it expires. UNASSIGNED CARD OUTSIDE BACKLOG (e.g. created in PLANKA directly in revisao_codigo): claim assigns you and KEEPS the current column (status in the response). It only fails by exclusivity when the card is active with a DIFFERENT assignee (claimed=false) — do NOT retry blindly. LEASE: a claim expires after a window of inactivity (SPEC_TASK_TIMEOUT_HOURS, default 24h) and the card returns to the backlog; the response carries claim_expires_at, and any action on the card (status change, edit, re-claim) renews it. Pipeline: em_andamento → revisao_codigo → fase_teste → concluido (never skip).")
 async def claim_task(task_id: str) -> str:
     try:
         def _sync_op():
@@ -1705,18 +1705,20 @@ async def claim_task(task_id: str) -> str:
                     return f"Error: {he.detail}"
                 result = _claim_task(db, tid, claimant)
                 if result.claimed:
+                    # Adoção de card sem dono fora do backlog mantém a coluna.
+                    status_after = result.status or "em_andamento"
                     return json.dumps(
                         enrich_status_payload(
                             {
                                 "claimed": True,
                                 "assignee": claimant,
                                 "version": result.version,
-                                "status": "em_andamento",
+                                "status": status_after,
                                 # Prazo do lease: passado este ponto sem atividade, o
                                 # card volta ao backlog sozinho.
                                 "claim_expires_at": result.expires_at,
                             },
-                            "em_andamento",
+                            status_after,
                             db=db,
                         ),
                         default=str,
