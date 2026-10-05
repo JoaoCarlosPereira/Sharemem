@@ -31,6 +31,8 @@ x-api-common: &api-common
     MEM0_PROJECT_GROUPS: ${MEM0_PROJECT_GROUPS:-sysmo-s1=sysmovs,sysmos1-modular,db-sysmo-s1}
     # Dedup semantica apos a escrita (PR #19). 'report' apenas registra em log
     # o que superseria, sem alterar dado; passar para 'apply' so apos calibrar.
+    # Relatorio consultavel: GET /admin/autodedup/report (tabela autodedup_reports);
+    # ver docs/runbooks/autodedup-calibration.md.
     MEM0_AUTODEDUP_MODE: ${MEM0_AUTODEDUP_MODE:-report}
     QDRANT_HOST: mem0_store
     QDRANT_PORT: "6333"

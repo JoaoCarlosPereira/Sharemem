@@ -18,6 +18,7 @@ from app.middleware.team_auth import TeamAuthMiddleware
 from app.models import App, User
 from app.routers import (
     admin_router,
+    admin_autodedup_router,
     admin_write_queue_router,
     agent_tokens_router,
     apps_router,
@@ -178,6 +179,7 @@ setup_mcp_server(app)
 app.include_router(auth_router)
 app.include_router(agent_tokens_router)
 app.include_router(admin_router)
+app.include_router(admin_autodedup_router)
 app.include_router(admin_write_queue_router)
 app.include_router(governance_router)
 app.include_router(governance_project_merge_router)

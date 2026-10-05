@@ -13,6 +13,7 @@ from unittest.mock import MagicMock, patch
 
 os.environ.setdefault("OPENAI_API_KEY", "test-key")
 
+import pytest
 
 from app.utils import autodedup
 from app.utils.autodedup import autodedup_after_write, find_near_duplicates
@@ -108,6 +109,37 @@ class TestDetection:
 
         assert find_near_duplicates(client, [{"id": "new", "memory": "x"}]) == []
 
+    @pytest.mark.parametrize("raw", ["nan", "inf", "-0.1", "1.5", "abc"])
+    def test_invalid_threshold_falls_back_and_apply_still_works(self, monkeypatch, raw):
+        """``nan`` made every ``score >= nan`` False — apply silently did nothing."""
+        monkeypatch.setenv("MEM0_AUTODEDUP_MODE", "apply")
+        monkeypatch.setenv("MEM0_AUTODEDUP_THRESHOLD", raw)
+        assert autodedup.autodedup_threshold() == 0.95
+        client = _client([_hit("dup", 0.99), _hit("abaixo", 0.94)])
+
+        with patch(
+            "app.utils.supersedes.mark_points_obsolete",
+            return_value={"updated": ["dup"], "missing": []},
+        ) as mark:
+            out = autodedup_after_write(client, _result(("new", "um fato")))
+
+        assert mark.call_args.args[1] == ["dup"]
+        assert out["superseded"] == ["dup"]
+
+    @pytest.mark.parametrize("raw,expected", [("0", 0.0), ("1", 1.0), (" 0.97 ", 0.97)])
+    def test_valid_threshold_unchanged(self, monkeypatch, raw, expected):
+        monkeypatch.setenv("MEM0_AUTODEDUP_THRESHOLD", raw)
+        assert autodedup.autodedup_threshold() == expected
+
+    @pytest.mark.parametrize(
+        "raw,threshold,expected",
+        [("nan", 0.95, 0.85), ("-1", 0.95, 0.85), ("2", 0.95, 0.85), ("0.99", 0.95, 0.95),
+         ("0", 0.95, 0.0), ("0.9", 0.95, 0.9), ("0.9", 0.0, 0.0)],
+    )
+    def test_report_floor_clamped(self, monkeypatch, raw, threshold, expected):
+        monkeypatch.setenv("MEM0_AUTODEDUP_REPORT_FLOOR", raw)
+        assert autodedup.autodedup_report_floor(threshold) == expected
+
     def test_deleted_events_are_not_candidates(self, monkeypatch):
         monkeypatch.setenv("MEM0_AUTODEDUP_MODE", "report")
         client = _client([_hit("dup", 0.99)])
@@ -118,3 +150,40 @@ class TestDetection:
 
         assert out["candidates"] == []
         client.vector_store.search.assert_not_called()
+
+
+class TestReportNeverTouchesRealDatabase:
+    """O modo report grava numa sessão própria; na suíte isso vai para o sandbox
+    do ``tests/conftest.py`` (autouse), nunca para DATABASE_URL/./openmemory.db."""
+
+    def test_report_mode_writes_to_sandbox(self, monkeypatch, autodedup_report_sandbox):
+        monkeypatch.setenv("MEM0_AUTODEDUP_MODE", "report")
+        out = autodedup_after_write(_client([_hit("dup", 0.99)]), _result(("new", "um fato")))
+
+        assert out["recorded"] == 1
+        assert autodedup_report_sandbox.count() == 1
+
+    def test_guard_flags_dml_on_report_table(self, autodedup_report_sandbox):
+        """A guarda registrada no engine real reconhece DML em autodedup_reports."""
+        guard = autodedup_report_sandbox.guard
+        guard(None, None, "SELECT * FROM autodedup_reports", {}, None, False)
+        guard(None, None, "INSERT INTO write_queue (id) VALUES (1)", {}, None, False)
+        assert autodedup_report_sandbox.violations == []
+        guard(None, None, "INSERT INTO autodedup_reports (id) VALUES (?)", {}, None, False)
+        assert len(autodedup_report_sandbox.violations) == 1
+        # CTE: o primeiro verbo é WITH, mas o comando é DML.
+        guard(
+            None, None,
+            "WITH old AS (SELECT id FROM autodedup_reports) DELETE FROM autodedup_reports "
+            "WHERE id IN (SELECT id FROM old)",
+            {}, None, False,
+        )
+        guard(None, None, "WITH x AS (SELECT 1) SELECT * FROM autodedup_reports", {}, None, False)
+        assert len(autodedup_report_sandbox.violations) == 2
+        autodedup_report_sandbox.violations.clear()  # não falhar este teste
+
+    def test_guard_is_attached_to_real_engine(self, autodedup_report_sandbox):
+        import app.database as database
+        from sqlalchemy import event
+
+        assert event.contains(database.engine, "before_cursor_execute", autodedup_report_sandbox.guard)
