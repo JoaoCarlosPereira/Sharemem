@@ -38,7 +38,13 @@ compose() {
 }
 
 echo "==> Build openmemory-mcp (API)..."
-run_docker build -f api/Dockerfile -t mem0/openmemory-mcp ..
+# INSTALL_RERANK/RERANK_PRELOAD_MODEL: rerank local opcional (docs/runbooks/rerank.md).
+# Repassados para que um rebuild nao remova silenciosamente o torch de uma imagem
+# em que o operador ligou o rerank. Default 0 = imagem sem torch.
+run_docker build -f api/Dockerfile \
+  --build-arg INSTALL_RERANK="${INSTALL_RERANK:-0}" \
+  --build-arg RERANK_PRELOAD_MODEL="${RERANK_PRELOAD_MODEL:-}" \
+  -t mem0/openmemory-mcp ..
 
 echo "==> Build openmemory-ui..."
 # .env.example embeds NEXT_PUBLIC_* placeholders so entrypoint.sh can inject

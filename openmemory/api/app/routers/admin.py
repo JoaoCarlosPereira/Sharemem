@@ -539,13 +539,21 @@ def rerank_admin() -> dict:
     if not status["configured"]:
         message = (
             "Rerank not configured (default). search_memory(rerank=true) returns "
-            "applied=false reason=not_configured. To enable later: set "
-            "MEM0_RERANKER_PROVIDER (e.g. sentence_transformer or cohere) and "
-            "optional MEM0_RERANKER_MODEL / MEM0_RERANKER_API_KEY, then recreate "
-            "only openmemory-mcp."
+            "applied=false reason=not_configured. To enable (local CPU, no cloud): "
+            "build the API image with INSTALL_RERANK=1, set "
+            "MEM0_RERANKER_PROVIDER=sentence_transformer and MEM0_RERANKER_MODEL "
+            "(e.g. cross-encoder/ms-marco-MiniLM-L-6-v2), then recreate only "
+            "openmemory-mcp. See openmemory/docs/runbooks/rerank.md."
         )
+    elif status.get("reason") == "loading":
+        message = f"Rerank model loading in background (provider={status['provider']})."
     elif status.get("reason") and status["reason"] != "not_loaded_yet":
         message = f"Rerank provider set but unavailable: {status['reason']}"
+    elif (status.get("breaker") or {}).get("state") == "open":
+        message = (
+            f"Rerank circuit breaker OPEN after consecutive timeouts; searches skip "
+            f"rerank (reason=circuit_open) for {status['breaker'].get('reopens_in_sec')}s more."
+        )
     else:
         message = f"Rerank configured with provider={status['provider']}."
     return {**status, "message": message}
