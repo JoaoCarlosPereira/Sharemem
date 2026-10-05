@@ -92,9 +92,9 @@ docker compose -f docker-compose.scale.yml up -d --no-deps planka openmemory-mcp
 
 - `openmemory-mcp` roda `alembic upgrade head` na subida: aplica
   `w1s2c3r4e5m6` (coluna anulável `spec_workspaces.created_by_email`, sem
-  índice; aditiva, sem alterar dados). **Merge com `feat/melhorias-mem0-dedup`:**
-  ela também cria `s1t2u3v4w5x6` sobre `r0s1t2u3v4w5`; ao juntar, aponte o
-  `down_revision` de `w1s2c3r4e5m6` para `s1t2u3v4w5x6` (um único head).
+  índice; aditiva, sem alterar dados). Em `feat/melhorias-mem0` ela convive com
+  `s1t2u3v4w5x6` (dedup) e `m1p2r3o4p5s6` (merge de projetos), todas sobre
+  `r0s1t2u3v4w5`; a revision de merge `t1u2v3w4x5y6` une as três num head único.
 - **Nunca** inclua `mem0_store` no comando. Antes/depois, confira
   `points_count` em `http://localhost:6333/collections/openmemory`: ele não deve mudar.
 
