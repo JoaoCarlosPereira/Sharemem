@@ -10,7 +10,11 @@ from app.database import SessionLocal, is_postgresql
 from app.models import GovernanceJob as GovernanceJobModel
 from app.models import GovernanceJobStatus, GovernanceJobType
 from app.utils.datetime_format import format_utc_iso
+from app.utils.datetime_utc import utc_now_naive
 from sqlalchemy.orm import Session
+
+# Max failed-attempt entries kept in ``payload.error_history`` per job.
+ERROR_HISTORY_LIMIT = 10
 
 
 @dataclass
@@ -172,7 +176,23 @@ class GovernanceQueue:
             if row is None:
                 return
             row.status = status
+            if error is not None:
+                # Keep every failed attempt (bounded) so a job that later ends
+                # ``done`` still shows why earlier attempts failed.
+                payload = dict(row.payload or {})
+                history = list(payload.get("error_history") or [])
+                history.append(
+                    {
+                        "at": format_utc_iso(utc_now_naive()),
+                        "attempt": attempts if attempts is not None else row.attempts,
+                        "error": error[:2000],
+                    }
+                )
+                payload["error_history"] = history[-ERROR_HISTORY_LIMIT:]
+                row.payload = payload
             if clear_error:
+                # ``done`` jobs never carry ``error``; the failure trail lives
+                # only in ``payload.error_history``.
                 row.error = None
             elif error is not None:
                 row.error = error

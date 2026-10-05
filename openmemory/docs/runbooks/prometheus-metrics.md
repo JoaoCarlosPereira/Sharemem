@@ -31,7 +31,7 @@ Counters e Histograms são somados automaticamente. Gauges usam modo explícito
 | Gauge | Modo | Por quê |
 |-------|------|---------|
 | `write_queue_depth`, `governance_job_queue_depth` | `livemostrecent` | snapshot de estado atual publicado por loop vivo; processo morto sai do agregado |
-| `project_memory_count`, `project_size_over_threshold`, `governance_quota_over_limit_projects`, `governance_revert_rate`, `retrieval_duplicate_in_topk_ratio`, `retrieval_quality_index`, `backup_duration_seconds` | `mostrecent` | snapshot calculado sob demanda; vale o último `set` de qualquer processo |
+| `project_memory_count`, `project_size_over_threshold`, `governance_quota_over_limit_projects`, `governance_revert_rate`, `retrieval_duplicate_in_topk_ratio`, `retrieval_quality_index`, `backup_duration_seconds`, `project_merge_inconsistent_projects`, `project_merge_pending_proposals` | `mostrecent` | snapshot calculado sob demanda; vale o último `set` de qualquer processo |
 | `backup_last_success_timestamp` | `max` | timestamp monotônico |
 | `governance_quarantined_current` | `sum` | alterado por `inc()` (`mostrecent` não aceita `inc`) |
 

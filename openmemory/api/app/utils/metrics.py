@@ -147,3 +147,18 @@ RETRIEVAL_QUALITY_INDEX = Gauge(
     "retrieval_quality_index", "LLM-judge retrieval quality index",
     multiprocess_mode="mostrecent",
 )
+# Project merge consistency (SQL-first + Qdrant compensation).
+PROJECT_MERGE_COMPENSATION_FAILURES = Counter(
+    "project_merge_compensation_failures_total",
+    "Qdrant points whose payload.project could not be reverted after a failed merge",
+)
+PROJECT_MERGE_INCONSISTENT_PROJECTS = Gauge(
+    "project_merge_inconsistent_projects",
+    "Projects with 0 Qdrant points but SQL references (possible half-applied merge)",
+    multiprocess_mode="mostrecent",
+)
+PROJECT_MERGE_PENDING_PROPOSALS = Gauge(
+    "project_merge_pending_proposals",
+    "Project merge proposals awaiting admin approval",
+    multiprocess_mode="mostrecent",
+)

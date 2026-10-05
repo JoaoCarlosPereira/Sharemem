@@ -544,6 +544,43 @@ class GovernanceJob(Base):
     )
 
 
+class ProjectMergeProposal(Base):
+    """Proposta de unificação de projetos aguardando decisão de um admin.
+
+    Status: ``pending`` → ``approved`` | ``rejected``; ``approved`` → ``applied``
+    | ``failed``; ``failed`` pode ser aprovado de novo (retry). As transições são
+    feitas com ``UPDATE ... WHERE status = <esperado>`` para que duas decisões
+    concorrentes não vençam ao mesmo tempo.
+
+    ``undo_info`` guarda, por alias aplicado, o nome original, a contagem de
+    memórias movidas e os IDs de ``write_queue`` / ``write_audit_logs``
+    reapontados, para permitir desfazer manualmente.
+    """
+    __tablename__ = "project_merge_proposals"
+    id = Column(UUID, primary_key=True, default=lambda: uuid.uuid4())
+    canonical = Column(String, nullable=False, index=True)
+    aliases = Column(JSON, nullable=False, default=list)
+    confidence = Column(sa.Float, nullable=False, default=0.0)
+    reason = Column(Text, nullable=True)
+    status = Column(String(16), nullable=False, default="pending", index=True)
+    origin = Column(String(32), nullable=True)
+    source_job_id = Column(String, nullable=True)
+    apply_job_id = Column(String, nullable=True)
+    memory_counts = Column(JSON, nullable=True)
+    undo_info = Column(JSON, nullable=True)
+    decided_by = Column(String, nullable=True)
+    decided_at = Column(DateTime, nullable=True)
+    decision_note = Column(Text, nullable=True)
+    applied_at = Column(DateTime, nullable=True)
+    error = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=get_current_utc_time, index=True)
+    updated_at = Column(
+        DateTime,
+        default=get_current_utc_time,
+        onupdate=get_current_utc_time,
+    )
+
+
 class GovernancePolicy(Base):
     """Per-project override of the global governance policy (ADR-005)."""
     __tablename__ = "governance_policies"

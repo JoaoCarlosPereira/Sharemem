@@ -99,6 +99,23 @@ beforeEach(() => {
         data: { processes_enabled: defaultProcesses },
       });
     }
+    if (String(url).includes("/projects/merge-proposals")) {
+      return Promise.resolve({
+        data: {
+          items: [
+            {
+              id: "p1",
+              canonical: "sysmovs",
+              aliases: ["dsv-sysmovs"],
+              confidence: 0.9,
+              reason: "mesmo repo",
+              status: "pending",
+            },
+          ],
+          count: 1,
+        },
+      });
+    }
     return Promise.resolve({ data: { global: {} } });
   });
   mockedAxios.post.mockReset().mockResolvedValue({ data: { status: "queued" } });
@@ -212,6 +229,18 @@ describe("GovernancePage", () => {
     expect(
       screen.getByRole("button", { name: "Analisar Duplicatas" }),
     ).toBeEnabled();
+  });
+
+  it("lista propostas de unificação e aprova via POST", async () => {
+    renderPage();
+    expect(await screen.findByText("sysmovs")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Aprovar" }));
+    await waitFor(() =>
+      expect(mockedAxios.post).toHaveBeenCalledWith(
+        expect.stringContaining("/projects/merge-proposals/p1/approve"),
+        {},
+      ),
+    );
   });
 
 });
