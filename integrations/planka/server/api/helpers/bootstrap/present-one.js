@@ -3,6 +3,8 @@
  * Licensed under the Fair Use License: https://github.com/plankanban/planka/blob/master/LICENSE.md
  */
 
+const { isMem0BridgeActive } = require('../../../utils/mem0-group-scope');
+
 module.exports = {
   sync: true,
 
@@ -31,6 +33,12 @@ module.exports = {
         activeUsersLimit: inputs.internalConfig.activeUsersLimit,
         customerPanelUrl: sails.config.custom.customerPanelUrl,
       });
+    }
+
+    // Mem0 Shared: com a ponte de auth ativa, o servidor recorta projetos/boards
+    // pelo grupo do usuário; o client agrupa tudo em "Equipe" (sem "Outros").
+    if (isMem0BridgeActive()) {
+      data.isMem0Shared = true;
     }
 
     if (sails.config.custom.demoMode) {

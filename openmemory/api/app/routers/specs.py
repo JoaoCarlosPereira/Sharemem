@@ -42,6 +42,7 @@ from app.utils.projects import upsert_project
 from app.utils.spec_auth import (
     is_legacy_spec_access_open,
     resolve_spec_actor,
+    resolve_spec_creator_email,
     resolve_spec_subject,
 )
 from app.utils.claim_lease import TIMEOUT_ACTOR, claim_expires_at
@@ -94,6 +95,7 @@ class WorkspaceResponse(BaseModel):
     name: str
     status: SpecWorkspaceStatus
     created_by: Optional[str] = None
+    created_by_email: Optional[str] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
@@ -681,6 +683,7 @@ def get_or_create_workspace(
     created_by: Optional[str] = None,
     status: Optional[SpecWorkspaceStatus] = None,
     group_id: Optional[UUID] = None,
+    created_by_email: Optional[str] = None,
 ) -> tuple[SpecWorkspace, bool]:
     """Cria ou retorna o workspace de ``(project_id, slug)`` — idempotente.
 
@@ -703,6 +706,7 @@ def get_or_create_workspace(
         name=name,
         status=status or SpecWorkspaceStatus.planejamento,
         created_by=created_by,
+        created_by_email=created_by_email,
         group_id=group_id,
     )
     db.add(ws)
@@ -820,6 +824,7 @@ def create_workspace(
         created_by=actor,
         status=payload.status,
         group_id=group_id,
+        created_by_email=resolve_spec_creator_email(db),
     )
     response.status_code = 201 if created else 200
     from app.utils.planka_hooks import mirror_ensure_workspace

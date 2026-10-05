@@ -8,6 +8,7 @@ Qdrant and only calls the PLANKA REST API.
 
 from __future__ import annotations
 
+import logging
 import os
 from typing import Any, Optional, Protocol
 from uuid import UUID
@@ -23,6 +24,8 @@ from app.models import (
     TaskCardStatus,
     parse_document_type,
 )
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_PLANKA_BASE_URL = "http://planka:1337"
 DEFAULT_PLANKA_TIMEOUT_SECONDS = 5.0
@@ -350,7 +353,17 @@ class PlankaMirrorHttpClient:
             )
         except PlankaMirrorError as exc:
             if exc.status_code == 404:
-                # Projeto foi removido diretamente no PLANKA; mapa órfão, não retenta.
+                # Projeto removido no PLANKA (mapa órfão) OU o ator DEFAULT_ADMIN
+                # não é gerente do projeto (projects/update.js devolve 404). Não
+                # retenta nem levanta, mas registra para não divergir em silêncio.
+                logger.warning(
+                    "PLANKA project lifecycle PATCH returned 404 for project %s "
+                    "(workspace %s); project may have been deleted, or "
+                    "DEFAULT_ADMIN_EMAIL may not be a project_manager of it — see "
+                    "runbooks/kanban-group-visibility.md",
+                    project_map.planka_id,
+                    workspace_id,
+                )
                 return
             raise
 

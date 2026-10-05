@@ -5,6 +5,9 @@
 
 const { v4: uuid } = require('uuid');
 
+const { isMem0BridgeActive } = require('../../../utils/mem0-group-scope');
+const revokeBoardAccessSideEffects = require('../../../utils/revoke-board-access-side-effects');
+
 module.exports = {
   inputs: {
     record: {
@@ -33,40 +36,22 @@ module.exports = {
   },
 
   async fn(inputs) {
-    await BoardSubscription.qm.delete({
+    // Mem0 Shared: limpeza extraída para reuso na reconciliação por grupo.
+    await revokeBoardAccessSideEffects({
       boardId: inputs.record.boardId,
       userId: inputs.user.id,
+      models: { BoardSubscription, Card, CardSubscription, CardMembership, TaskList, Task },
     });
-
-    const cardIds = await sails.helpers.boards.getCardIds(inputs.record.boardId);
-
-    await CardSubscription.qm.delete({
-      cardId: cardIds,
-      userId: inputs.user.id,
-    });
-
-    await CardMembership.qm.delete({
-      cardId: cardIds,
-      userId: inputs.user.id,
-    });
-
-    const taskLists = await TaskList.qm.getByCardIds(cardIds);
-    const taskListIds = sails.helpers.utils.mapRecords(taskLists);
-
-    await Task.qm.update(
-      {
-        taskListId: taskListIds,
-        assigneeUserId: inputs.user.id,
-      },
-      {
-        assigneeUserId: null,
-      },
-    );
 
     const boardMembership = await BoardMembership.qm.deleteOne(inputs.record.id);
 
     if (boardMembership) {
-      if (inputs.user.role !== User.Roles.ADMIN || inputs.project.ownerProjectManagerId) {
+      // Mem0 Shared: com a ponte ativa ADMIN não tem visão total — expulsa da sala.
+      if (
+        inputs.user.role !== User.Roles.ADMIN ||
+        inputs.project.ownerProjectManagerId ||
+        isMem0BridgeActive()
+      ) {
         const isProjectManager = await sails.helpers.users.isProjectManager(
           boardMembership.userId,
           inputs.project.id,
