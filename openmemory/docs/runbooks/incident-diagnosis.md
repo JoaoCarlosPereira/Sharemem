@@ -65,7 +65,7 @@ copie o `trace_id` do log e abra no Tempo para ver a cadeia
 
 ```bash
 curl localhost:8765/health     # database, qdrant, memory client, fila, rerank status
-curl localhost:8765/metrics    # métricas Prometheus
+curl localhost:8765/metrics    # métricas Prometheus (agregadas entre processos; ver prometheus-metrics.md)
 curl localhost:8765/admin/deletion-guard
 curl localhost:8765/admin/rerank   # configured=false + reason=not_configured é o default
 ```

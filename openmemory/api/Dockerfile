@@ -31,4 +31,8 @@ COPY openmemory/docker-stack.yml .
 COPY openmemory/scripts/ scripts/
 
 EXPOSE 8765
+# Limpa PROMETHEUS_MULTIPROC_DIR (se definido) antes de qualquer processo
+# Python e então executa o CMD/command do compose. Invocado via `sh` para não
+# depender do bit executável preservado no checkout.
+ENTRYPOINT ["sh", "/usr/src/openmemory/docker-entrypoint.sh"]
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8765"]
