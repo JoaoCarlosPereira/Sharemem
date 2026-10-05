@@ -63,8 +63,16 @@ const AppDetailCard = ({
     setRenaming(true);
     try {
       const result = await renameApp(appId, newName);
-      toast.success(`Projeto renomeado/mesclado com sucesso para "${result.new_name}" (${result.moved_memories} memórias atualizadas).`);
       setRenameOpen(false);
+      if (result.status === "proposal_pending") {
+        toast.info(
+          `"${result.new_name}" já existe: proposta de unificação criada, aguarda aprovação em Governança.`,
+        );
+        return;
+      }
+      toast.success(
+        `Projeto renomeado para "${result.new_name ?? newName}" (${result.moved_memories ?? 0} memórias atualizadas).`,
+      );
       router.push("/apps");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Falha ao renomear projeto");

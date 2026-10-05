@@ -10,50 +10,117 @@ from app.utils.read_audit import (
     list_project_accessed_memories,
     project_access_stats,
 )
-from app.utils.vector_stats import count_project_memories, list_shared_memories
-from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field
-from app.governance.project_merge import apply_project_merge
+from app.governance.merge_proposals import find_open_proposal, record_proposals
+from app.governance.project_merge import (
+    MergeRuleViolation,
+    ProjectMergeError,
+    apply_project_merge,
+    is_merge_process_enabled,
+    merge_block_reason,
+    project_exists,
+)
+from app.utils.admin_auth import require_admin
 from app.utils.memory import get_memory_client_safe
+from app.utils.vector_stats import (
+    VectorStoreUnavailable,
+    count_project_memories,
+    count_project_memories_strict,
+    list_shared_memories,
+)
+from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 from sqlalchemy import desc, func
 from sqlalchemy.orm import Session, joinedload
 
 router = APIRouter(prefix="/api/v1/apps", tags=["apps"])
 
 
-
 class RenameProjectRequest(BaseModel):
     new_name: str = Field(..., min_length=1)
+
 
 @router.post("/{app_id}/rename")
 async def rename_project(
     app_id: UUID,
     request: RenameProjectRequest,
     db: Session = Depends(get_db),
+    _: None = Depends(require_admin),
 ):
-    """Rename a project. If the new name already exists, memories are merged."""
+    """Rename a project (admin). Existing target → 202 merge proposal.
+
+    Protected names are refused as source and target (422), by tech-lead
+    decision; see ``openmemory/docs/runbooks/project-merge.md``.
+    """
     old_name = resolve_project_name(db, app_id)
     if not old_name:
         raise HTTPException(status_code=400, detail="Cannot rename legacy SQL apps, only projects")
-    
+
     new_name = request.new_name.strip()
     if not new_name or new_name == old_name:
         return {"status": "success", "message": "Nothing to do"}
-        
+
+    blocked = {n: r for n in (old_name, new_name) if (r := merge_block_reason(n))}
+    if blocked:
+        detail = ", ".join(f"{n} ({r})" for n, r in blocked.items())
+        raise HTTPException(status_code=422, detail=f"nome de projeto protegido: {detail}")
+
     client = get_memory_client_safe()
     if client is None:
         raise HTTPException(status_code=503, detail="Memory client is not available")
-        
-    vs = client.vector_store
-    moved = apply_project_merge(
-        db,
-        vs,
-        canonical=new_name,
-        aliases=[old_name],
-        job_id="manual-rename"
-    )
-    
+
+    try:
+        target_exists = project_exists(db, new_name, count_fn=count_project_memories_strict)
+    except VectorStoreUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    if target_exists:
+        if not is_merge_process_enabled(db):
+            raise HTTPException(
+                status_code=409,
+                detail="processo de governança 'merge_projects' está desabilitado",
+            )
+        proposals = record_proposals(
+            db,
+            [
+                {
+                    "canonical": new_name,
+                    "aliases": [old_name],
+                    "confidence": 1.0,
+                    "reason": "rename manual para projeto existente",
+                }
+            ],
+            source_job_id=None,
+            origin="rename",
+        )
+        return JSONResponse(
+            status_code=202,
+            content={
+                "status": "proposal_pending",
+                "new_name": new_name,
+                "proposal": proposals[0]
+                if proposals
+                else find_open_proposal(db, new_name, [old_name]),
+                "message": "destino já existe: proposta de unificação aguardando aprovação",
+            },
+        )
+
+    try:
+        moved = apply_project_merge(
+            db,
+            client.vector_store,
+            canonical=new_name,
+            aliases=[old_name],
+            job_id="manual-rename",
+            require_new_canonical=True,
+        )
+    except MergeRuleViolation as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ProjectMergeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
     return {"status": "success", "moved_memories": moved, "new_name": new_name}
+
 
 class DeleteProjectRequest(BaseModel):
     """Strong confirmation: user must type the exact project name."""

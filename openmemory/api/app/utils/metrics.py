@@ -90,3 +90,16 @@ RETRIEVAL_DUPLICATE_IN_TOPK_RATIO = Gauge(
     "retrieval_duplicate_in_topk_ratio", "Proxy duplicate ratio in search top-K"
 )
 RETRIEVAL_QUALITY_INDEX = Gauge("retrieval_quality_index", "LLM-judge retrieval quality index")
+# Project merge consistency (SQL-first + Qdrant compensation).
+PROJECT_MERGE_COMPENSATION_FAILURES = Counter(
+    "project_merge_compensation_failures_total",
+    "Qdrant points whose payload.project could not be reverted after a failed merge",
+)
+PROJECT_MERGE_INCONSISTENT_PROJECTS = Gauge(
+    "project_merge_inconsistent_projects",
+    "Projects with 0 Qdrant points but SQL references (possible half-applied merge)",
+)
+PROJECT_MERGE_PENDING_PROPOSALS = Gauge(
+    "project_merge_pending_proposals",
+    "Project merge proposals awaiting admin approval",
+)

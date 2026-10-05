@@ -55,6 +55,29 @@ function isConfigPath(segments: string[]): boolean {
   );
 }
 
+/** GETs admin-only consumidos pela tela de governança (propostas de merge). */
+function isAdminGovernanceReadPath(segments: string[]): boolean {
+  return (
+    segments[0] === "admin" &&
+    segments[1] === "governance" &&
+    segments[2] === "projects" &&
+    ["merge-proposals", "merge-inconsistencies", "merge-preview"].includes(
+      segments[3],
+    )
+  );
+}
+
+/** ``POST /api/v1/apps/{id}/rename`` exige admin (pode virar proposta de merge). */
+function isAppRenamePath(segments: string[]): boolean {
+  return (
+    segments.length === 5 &&
+    segments[0] === "api" &&
+    segments[1] === "v1" &&
+    segments[2] === "apps" &&
+    segments[4] === "rename"
+  );
+}
+
 function needsLegacyAdminToken(
   method: string,
   segments: string[],
@@ -67,7 +90,10 @@ function needsLegacyAdminToken(
   if (!legacyUi) return false;
   // Config: todos os métodos (o GET devolve a config do LLM).
   if (isConfigPath(segments)) return true;
-  return segments[0] === "admin" && MUTATING_METHODS.has(method.toUpperCase());
+  const verb = method.toUpperCase();
+  if (verb === "GET" && isAdminGovernanceReadPath(segments)) return true;
+  if (verb === "POST" && isAppRenamePath(segments)) return true;
+  return segments[0] === "admin" && MUTATING_METHODS.has(verb);
 }
 
 /**

@@ -143,6 +143,65 @@ describe("applyLegacyAdminToken", () => {
     }
   });
 
+  describe("merge de projetos (UI legado)", () => {
+    it.each([
+      [["admin", "governance", "projects", "merge-proposals"]],
+      [["admin", "governance", "projects", "merge-proposals", "abc"]],
+      [["admin", "governance", "projects", "merge-inconsistencies"]],
+      [["admin", "governance", "projects", "merge-preview"]],
+    ])("injeta X-Admin-Token no GET %j", (pathSegments) => {
+      const out = applyLegacyAdminToken(new Headers(), {
+        method: "GET",
+        pathSegments,
+        adminToken: token,
+        legacyUi: true,
+      });
+      expect(out.get("x-admin-token")).toBe(token);
+    });
+
+    it("não injeta em outros GET de governança", () => {
+      const out = applyLegacyAdminToken(new Headers(), {
+        method: "GET",
+        pathSegments: ["admin", "governance", "jobs"],
+        adminToken: token,
+        legacyUi: true,
+      });
+      expect(out.has("x-admin-token")).toBe(false);
+    });
+
+    it.each([
+      [["admin", "governance", "projects", "merge"]],
+      [["admin", "governance", "projects", "merge-now"]],
+      [["api", "v1", "apps", "app-id", "rename"]],
+    ])("injeta X-Admin-Token no POST %j", (pathSegments) => {
+      const out = applyLegacyAdminToken(
+        new Headers({ authorization: "Bearer local" }),
+        { method: "POST", pathSegments, adminToken: token, legacyUi: true },
+      );
+      expect(out.get("x-admin-token")).toBe(token);
+    });
+
+    it("rename: não injeta fora do modo legado nem em outras rotas de apps", () => {
+      const rename = ["api", "v1", "apps", "app-id", "rename"];
+      expect(
+        applyLegacyAdminToken(new Headers(), {
+          method: "POST",
+          pathSegments: rename,
+          adminToken: token,
+          legacyUi: false,
+        }).has("x-admin-token"),
+      ).toBe(false);
+      expect(
+        applyLegacyAdminToken(new Headers(), {
+          method: "PUT",
+          pathSegments: ["api", "v1", "apps", "app-id"],
+          adminToken: token,
+          legacyUi: true,
+        }).has("x-admin-token"),
+      ).toBe(false);
+    });
+  });
+
   describe("/api/v1/config (admin em todos os métodos)", () => {
     it.each(["GET", "PUT", "PATCH", "POST"])(
       "injeta X-Admin-Token em %s /api/v1/config/* sem credencial (UI legado)",

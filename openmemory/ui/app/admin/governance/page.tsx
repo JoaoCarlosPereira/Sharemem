@@ -46,6 +46,35 @@ type ProjectMergePreviewResponse = {
   count: number;
 };
 
+type MergeProposalStatus =
+  | "pending"
+  | "approved"
+  | "rejected"
+  | "applied"
+  | "failed";
+
+type MergeProposal = {
+  id: string;
+  canonical: string;
+  aliases: string[];
+  confidence: number;
+  reason: string;
+  status: MergeProposalStatus;
+  origin?: string | null;
+  memory_counts?: Record<string, number> | null;
+  decided_by?: string | null;
+  last_error?: string | null;
+  created_at?: string | null;
+};
+
+const PROPOSAL_STATUS_LABEL: Record<MergeProposalStatus, string> = {
+  pending: "Pendente",
+  approved: "Aprovada (na fila)",
+  rejected: "Rejeitada",
+  applied: "Aplicada",
+  failed: "Falhou",
+};
+
 type ScheduleConfig = {
   schedule_timezone: string;
   schedule_weekdays: number[];
@@ -110,7 +139,8 @@ const PROCESS_DEFS: { type: string; label: string; description: string }[] = [
   {
     type: "merge_projects",
     label: "Unificação de projetos",
-    description: "Move memórias de projetos duplicados para o nome canônico (LLM)",
+    description:
+      "Propõe unificar projetos duplicados (LLM); aplica só após aprovação de admin",
   },
 ];
 
@@ -150,6 +180,58 @@ export default function GovernancePage() {
     null,
   );
   const [processSaving, setProcessSaving] = useState<string | null>(null);
+  const [proposals, setProposals] = useState<MergeProposal[] | null>(null);
+  const [proposalFilter, setProposalFilter] = useState<string>("pending");
+  const [proposalBusy, setProposalBusy] = useState<string | null>(null);
+
+  const loadProposals = useCallback(async () => {
+    try {
+      const res = await axios.get<{ items: MergeProposal[]; count: number }>(
+        `${getApiUrl()}/admin/governance/projects/merge-proposals`,
+        {
+          params: {
+            status: proposalFilter === "all" ? undefined : proposalFilter,
+            limit: 100,
+          },
+        },
+      );
+      setProposals(Array.isArray(res.data?.items) ? res.data.items : []);
+    } catch {
+      setProposals([]);
+      toast.error("Falha ao carregar propostas de unificação");
+    }
+  }, [proposalFilter]);
+
+  useEffect(() => {
+    loadProposals();
+  }, [loadProposals]);
+
+  const handleProposalDecision = useCallback(
+    async (proposal: MergeProposal, action: "approve" | "reject") => {
+      setProposalBusy(proposal.id);
+      try {
+        await axios.post(
+          `${getApiUrl()}/admin/governance/projects/merge-proposals/${proposal.id}/${action}`,
+          {},
+        );
+        toast.success(
+          action === "approve"
+            ? `Unificação em '${proposal.canonical}' aprovada e enfileirada`
+            : "Proposta rejeitada",
+        );
+        await Promise.all([loadProposals(), fetchGovernanceJobs()]);
+      } catch (err) {
+        const detail = axios.isAxiosError(err)
+          ? (err.response?.data as { detail?: string } | undefined)?.detail
+          : undefined;
+        toast.error(detail ?? "Falha ao registrar a decisão");
+        await loadProposals();
+      } finally {
+        setProposalBusy(null);
+      }
+    },
+    [loadProposals, fetchGovernanceJobs],
+  );
 
   useEffect(() => {
     fetchProjectSizes()
@@ -215,16 +297,18 @@ export default function GovernancePage() {
       await axios.post(`${getApiUrl()}/admin/governance/projects/merge`, {
         dry_run: false,
       });
-      toast.success("Unificação de projetos enfileirada");
+      toast.success(
+        "Propostas de unificação enfileiradas — aprovação de admin necessária para aplicar",
+      );
       setMergeDialogOpen(false);
       setMergePreview(null);
-      await fetchGovernanceJobs();
+      await Promise.all([fetchGovernanceJobs(), loadProposals()]);
     } catch {
-      toast.error("Falha ao enfileirar unificação de projetos");
+      toast.error("Falha ao enfileirar propostas de unificação");
     } finally {
       setMergeLoading(false);
     }
-  }, [fetchGovernanceJobs]);
+  }, [fetchGovernanceJobs, loadProposals]);
 
   const toggleWeekday = useCallback((day: number, checked: boolean) => {
     setSchedule((prev) => {
@@ -347,8 +431,12 @@ export default function GovernancePage() {
         <p className="mb-3 max-w-2xl text-sm text-zinc-500">
           Detecta projetos MCP que representam o mesmo workspace (ex.:{" "}
           <code className="text-zinc-400">sysmovs</code>,{" "}
-          <code className="text-zinc-400">dsv-delphi-sysmovs</code>) e move
-          todas as memórias para um nome canônico.
+          <code className="text-zinc-400">dsv-delphi-sysmovs</code>) e gera
+          propostas de unificação para um nome canônico. Nada é movido
+          automaticamente: cada proposta precisa ser aprovada por um admin.
+          Projetos <code className="text-zinc-400">default</code>,{" "}
+          <code className="text-zinc-400">tarefa-*</code> e numéricos nunca
+          são unificados.
         </p>
         <div className="flex flex-wrap gap-2">
           <Button
@@ -360,6 +448,103 @@ export default function GovernancePage() {
             Analisar Duplicatas
           </Button>
         </div>
+      </section>
+
+      <section className="mb-6">
+        <div className="mb-2 flex items-center justify-between gap-4">
+          <h2 className="text-sm font-medium text-zinc-400">
+            Propostas de unificação
+          </h2>
+          <Select value={proposalFilter} onValueChange={setProposalFilter}>
+            <SelectTrigger
+              className="h-8 w-48"
+              aria-label="Filtrar propostas por status"
+            >
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">Todas</SelectItem>
+              {(Object.keys(PROPOSAL_STATUS_LABEL) as MergeProposalStatus[]).map(
+                (s) => (
+                  <SelectItem key={s} value={s}>
+                    {PROPOSAL_STATUS_LABEL[s]}
+                  </SelectItem>
+                ),
+              )}
+            </SelectContent>
+          </Select>
+        </div>
+        <p className="mb-3 max-w-2xl text-sm text-zinc-500">
+          Aprovar enfileira a aplicação (requer o processo habilitado).
+          Propostas que falharam podem ser aprovadas de novo para repetir.
+        </p>
+        {proposals === null ? (
+          <p className="text-sm text-zinc-500">Carregando propostas…</p>
+        ) : proposals.length === 0 ? (
+          <p className="text-sm text-zinc-500">Nenhuma proposta.</p>
+        ) : (
+          <div className="grid max-w-4xl gap-2">
+            {proposals.map((p) => {
+              const canApprove =
+                (p.status === "pending" || p.status === "failed") &&
+                isProcessEnabled("merge_projects");
+              const canReject =
+                p.status === "pending" ||
+                p.status === "approved" ||
+                p.status === "failed";
+              return (
+                <div
+                  key={p.id}
+                  className="flex items-start justify-between gap-4 rounded-md border border-zinc-800 bg-zinc-900/50 px-4 py-2.5 text-sm"
+                >
+                  <div className="min-w-0">
+                    <p className="text-zinc-200">
+                      {p.aliases.join(", ")} →{" "}
+                      <span className="font-medium">{p.canonical}</span>
+                    </p>
+                    <p className="text-xs text-zinc-500">
+                      {PROPOSAL_STATUS_LABEL[p.status] ?? p.status} ·
+                      confiança {(p.confidence * 100).toFixed(0)}%
+                      {p.origin ? ` · ${p.origin}` : ""}
+                      {p.created_at
+                        ? ` · ${formatDateTimeFull(p.created_at)}`
+                        : ""}
+                    </p>
+                    {p.reason && (
+                      <p className="truncate text-xs text-zinc-500">
+                        {p.reason}
+                      </p>
+                    )}
+                    {p.last_error && (
+                      <p className="text-xs text-red-400">{p.last_error}</p>
+                    )}
+                  </div>
+                  <div className="flex shrink-0 gap-2">
+                    {canApprove && (
+                      <Button
+                        size="sm"
+                        disabled={proposalBusy === p.id}
+                        onClick={() => handleProposalDecision(p, "approve")}
+                      >
+                        {p.status === "failed" ? "Tentar de novo" : "Aprovar"}
+                      </Button>
+                    )}
+                    {canReject && (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={proposalBusy === p.id}
+                        onClick={() => handleProposalDecision(p, "reject")}
+                      >
+                        Rejeitar
+                      </Button>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
       </section>
 
       <section className="mb-6">
@@ -650,7 +835,7 @@ export default function GovernancePage() {
               disabled={mergeLoading || !mergePreview || mergePreview.length === 0}
               onClick={handleMergeProjects}
             >
-              Unificar Projetos
+              Propor unificação
             </Button>
           </DialogFooter>
         </DialogContent>
