@@ -65,18 +65,16 @@ copie o `trace_id` do log e abra no Tempo para ver a cadeia
 
 ```bash
 curl localhost:8765/health     # database, qdrant, memory client, fila, rerank status
-curl localhost:8765/metrics    # métricas Prometheus
+curl localhost:8765/metrics    # métricas Prometheus (agregadas entre processos; ver prometheus-metrics.md)
 curl localhost:8765/admin/deletion-guard
 curl localhost:8765/admin/rerank   # configured=false + reason=not_configured é o default
 ```
 
-### Rerank (opcional — backlog)
+### Rerank (opcional)
 
 Por padrão **não** há modelo de rerank. `search_memory(rerank=true)` responde
-`rerank.applied=false` com `reason=not_configured`. Para ligar depois (fora do
-caminho crítico):
-
-1. Definir `MEM0_RERANKER_PROVIDER` (`sentence_transformer` ou `cohere`) e
-   opcionalmente `MEM0_RERANKER_MODEL` / `MEM0_RERANKER_API_KEY`.
-2. Recriar **somente** `openmemory-mcp` (`up -d --no-deps`); não reinicie Qdrant.
-3. Confirmar `GET /admin/rerank` e um search com `rerank=true` → `applied=true`.
+`rerank.applied=false` com `reason=not_configured`. Para ligar (cross-encoder
+local em CPU, imagem com `INSTALL_RERANK=1`), medir p95 antes/depois e entender
+os `reason` (`loading`, `timeout`, `failed`, `unavailable`, `blocked_local_only`),
+veja [`rerank.md`](rerank.md). Recriar **somente** `openmemory-mcp`; não reinicie
+Qdrant.

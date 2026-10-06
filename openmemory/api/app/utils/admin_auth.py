@@ -63,7 +63,7 @@ def require_admin(request: Request) -> None:
                 raise HTTPException(
                     status_code=403,
                     detail=(
-                        "admin mutation denied: session email not in AUTH_ADMIN_EMAILS"
+                        "admin access denied: session email not in AUTH_ADMIN_EMAILS"
                     ),
                 )
         return
@@ -72,14 +72,14 @@ def require_admin(request: Request) -> None:
         raise HTTPException(
             status_code=401,
             detail=(
-                "admin mutation requires X-Admin-Token (ADMIN_TOKEN) "
+                "admin credentials required: send X-Admin-Token (ADMIN_TOKEN) "
                 "or a valid session JWT"
             ),
         )
     raise HTTPException(
         status_code=401,
         detail=(
-            "admin mutation requires authentication: set ADMIN_TOKEN or sign in "
+            "admin credentials required: set ADMIN_TOKEN or sign in "
             "(session JWT). Legacy/anonymous access is not allowed for this endpoint."
         ),
     )

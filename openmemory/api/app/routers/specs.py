@@ -42,6 +42,7 @@ from app.utils.projects import upsert_project
 from app.utils.spec_auth import (
     is_legacy_spec_access_open,
     resolve_spec_actor,
+    resolve_spec_creator_email,
     resolve_spec_subject,
 )
 from app.utils.claim_lease import TIMEOUT_ACTOR, claim_expires_at
@@ -52,8 +53,10 @@ from app.utils.spec_search import (
 from app.utils.spec_versioning import write_document_version
 from app.utils.task_lock import (
     TaskStatusPolicyError,
+    archive_task,
     claim_task,
     release_task,
+    unarchive_task,
     update_task_metadata,
     update_task_status,
 )
@@ -92,6 +95,7 @@ class WorkspaceResponse(BaseModel):
     name: str
     status: SpecWorkspaceStatus
     created_by: Optional[str] = None
+    created_by_email: Optional[str] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
@@ -156,6 +160,9 @@ class TaskResponse(BaseModel):
     checklist_done: int = 0
     checklist_total: int = 0
     attachment_count: int = 0
+    # Arquivamento não destrutivo: ``archived_at`` nulo = card ativo.
+    archived_at: Optional[datetime] = None
+    archived_by: Optional[str] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
@@ -230,6 +237,12 @@ class ClaimRequest(BaseModel):
 
 
 class ReleaseRequest(BaseModel):
+    actor: Optional[str] = None
+    reason: Optional[str] = None
+
+
+class ArchiveRequest(BaseModel):
+    expected_version: int
     actor: Optional[str] = None
     reason: Optional[str] = None
 
@@ -670,6 +683,7 @@ def get_or_create_workspace(
     created_by: Optional[str] = None,
     status: Optional[SpecWorkspaceStatus] = None,
     group_id: Optional[UUID] = None,
+    created_by_email: Optional[str] = None,
 ) -> tuple[SpecWorkspace, bool]:
     """Cria ou retorna o workspace de ``(project_id, slug)`` — idempotente.
 
@@ -692,6 +706,7 @@ def get_or_create_workspace(
         name=name,
         status=status or SpecWorkspaceStatus.planejamento,
         created_by=created_by,
+        created_by_email=created_by_email,
         group_id=group_id,
     )
     db.add(ws)
@@ -809,6 +824,7 @@ def create_workspace(
         created_by=actor,
         status=payload.status,
         group_id=group_id,
+        created_by_email=resolve_spec_creator_email(db),
     )
     response.status_code = 201 if created else 200
     from app.utils.planka_hooks import mirror_ensure_workspace
@@ -870,7 +886,7 @@ def _build_summaries(
     if ws_ids:
         rows = (
             db.query(TaskCard.workspace_id, TaskCard.status, func.count().label("c"))
-            .filter(TaskCard.workspace_id.in_(ws_ids))
+            .filter(TaskCard.workspace_id.in_(ws_ids), TaskCard.archived_at.is_(None))
             .group_by(TaskCard.workspace_id, TaskCard.status)
             .all()
         )
@@ -1039,7 +1055,7 @@ def get_workspace_board(
     )
     tasks = (
         db.query(TaskCard)
-        .filter(TaskCard.workspace_id == workspace_id)
+        .filter(TaskCard.workspace_id == workspace_id, TaskCard.archived_at.is_(None))
         .order_by(TaskCard.position.asc(), TaskCard.created_at.asc())
         .all()
     )
@@ -1420,6 +1436,58 @@ def planka_card_updated(
     return PlankaCardUpdateResponse(**result)
 
 
+class PlankaCardCreateRequest(BaseModel):
+    planka_card_id: str
+    planka_list_id: str
+    name: Optional[str] = None
+    description: Optional[str] = None
+    due_date: Optional[datetime] = None
+    position: Optional[float] = None
+    actor: Optional[str] = None
+
+
+def planka_ui_import_enabled() -> bool:
+    """Kill switch do import PLANKA → Spec (``PLANKA_IMPORT_UI_CARDS=0`` desliga)."""
+    import os
+
+    raw = (os.getenv("PLANKA_IMPORT_UI_CARDS") or "1").strip().lower()
+    return raw not in ("0", "false", "no", "off")
+
+
+@router.post("/planka/card-created", response_model=PlankaCardMoveResponse)
+def planka_card_created(
+    payload: PlankaCardCreateRequest,
+    authorization: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+) -> PlankaCardMoveResponse:
+    """Bridge PLANKA → Spec: card criado por uma pessoa (sessão JWT) na tela do PLANKA.
+
+    Cria a ``TaskCard`` no workspace dono da lista, com status = coluna e sem
+    assignee. Idempotente: card já mapeado → ``already_mapped``. Listas não
+    mapeadas/SDD → ``applied=False``.
+    """
+    from app.utils.planka import is_planka_id
+    from app.utils.planka_import import import_planka_card
+
+    _assert_planka_bridge_token(authorization)
+    if not planka_ui_import_enabled():
+        return PlankaCardMoveResponse(applied=False, reason="import_disabled")
+    # Valida o valor bruto (sem strip): o PLANKA envia String(id); "12\n" é inválido.
+    if not (is_planka_id(payload.planka_card_id) and is_planka_id(payload.planka_list_id)):
+        return PlankaCardMoveResponse(applied=False, reason="invalid_id")
+    result = import_planka_card(
+        db,
+        planka_card_id=payload.planka_card_id,
+        planka_list_id=payload.planka_list_id,
+        name=payload.name,
+        description=payload.description,
+        due_date=payload.due_date,
+        position=payload.position,
+        actor=(payload.actor or resolve_spec_actor() or "planka-ui").strip(),
+    )
+    return PlankaCardMoveResponse(**result)
+
+
 class PlankaProjectLifecycleRequest(BaseModel):
     planka_project_id: str
     is_archived: bool
@@ -1685,6 +1753,9 @@ def list_workspace_tasks(
     status: Optional[TaskCardStatus] = Query(
         None, description="Filtra por coluna do Kanban"
     ),
+    include_archived: bool = Query(
+        False, description="Inclui cards arquivados (escondidos por padrão)"
+    ),
     db: Session = Depends(get_db),
 ) -> list[TaskResponse]:
     """Cards do workspace, opcionalmente filtrados por coluna.
@@ -1700,6 +1771,8 @@ def list_workspace_tasks(
     _assert_access(db, workspace_id)
 
     query = db.query(TaskCard).filter(TaskCard.workspace_id == workspace_id)
+    if not include_archived:
+        query = query.filter(TaskCard.archived_at.is_(None))
     if status is not None:
         query = query.filter(TaskCard.status == status)
     tasks = query.order_by(TaskCard.created_at.asc()).all()
@@ -1886,6 +1959,7 @@ def claim_task_endpoint(
                 "claimed": False,
                 "current_assignee": result.current_assignee,
                 "version": result.version,
+                "archived": result.archived,
             },
         )
     db.refresh(task)
@@ -1906,12 +1980,71 @@ def release_task_endpoint(
     _assert_access(db, task.workspace_id)
 
     actor = resolve_spec_actor(body_actor=payload.actor)
-    release_task(db, task_id, actor, payload.reason)
+    try:
+        release_task(db, task_id, actor, payload.reason)
+    except TaskStatusPolicyError as exc:
+        raise _policy_http(exc) from exc
     db.refresh(task)
     from app.utils.planka_hooks import mirror_task_status
 
     mirror_task_status(db, task_id)
     return _enrich_task(db, task)
+
+
+def _apply_archive(
+    db: Session, task_id: UUID, payload: ArchiveRequest, *, archive: bool
+) -> TaskResponse:
+    task = _get_task_or_404(db, task_id)
+    _assert_access(db, task.workspace_id)
+
+    actor = resolve_spec_actor(body_actor=payload.actor)
+    try:
+        if archive:
+            result = archive_task(
+                db, task_id, payload.expected_version, actor, reason=payload.reason
+            )
+        else:
+            result = unarchive_task(db, task_id, payload.expected_version, actor)
+    except TaskStatusPolicyError as exc:
+        raise _policy_http(exc) from exc
+    if result.conflict:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "conflict": True,
+                "current_version": result.version,
+                "archived_at": (
+                    result.archived_at.isoformat() if result.archived_at else None
+                ),
+            },
+        )
+    db.refresh(task)
+    return _enrich_task(db, task)
+
+
+@router.post("/tasks/{task_id}/archive", response_model=TaskResponse)
+def archive_task_endpoint(
+    task_id: UUID,
+    payload: ArchiveRequest,
+    db: Session = Depends(get_db),
+) -> TaskResponse:
+    """Arquiva o card sem apagar nada (alternativa não destrutiva ao DELETE).
+
+    Some da listagem padrão e do quadro; histórico de status e comentários são
+    preservados. 409 em conflito de versão, card já arquivado, ou card ativo de
+    outro assignee (exclusividade do claim — ADR-003).
+    """
+    return _apply_archive(db, task_id, payload, archive=True)
+
+
+@router.post("/tasks/{task_id}/unarchive", response_model=TaskResponse)
+def unarchive_task_endpoint(
+    task_id: UUID,
+    payload: ArchiveRequest,
+    db: Session = Depends(get_db),
+) -> TaskResponse:
+    """Desarquiva o card: volta à listagem na mesma coluna em que estava."""
+    return _apply_archive(db, task_id, payload, archive=False)
 
 
 @router.patch("/tasks/{task_id}/status", response_model=TaskResponse)

@@ -18,7 +18,9 @@
 const { Client } = require('pg');
 
 const { authenticateMem0Request, authenticateOmtk } = require('./lib/validate-auth');
-const getBoardGroupIds = require('../../../utils/get-board-group-ids');
+const {
+  ensureSharedAccess: ensureSharedAccessForGroup,
+} = require('../../../utils/mem0-shared-access');
 
 module.exports = function defineMem0AuthHook(sails) {
   let pgClient = null;
@@ -85,26 +87,6 @@ module.exports = function defineMem0AuthHook(sails) {
     return `${sub || 'mem0-user'}@mem0.local`;
   };
 
-  const reconcileBoardMembership = async (user, board, project, boardGroupId, userGroupId) => {
-    const existingBm = await BoardMembership.qm.getOneByBoardIdAndUserId(board.id, user.id);
-    const isOwnGroup = String(boardGroupId) === String(userGroupId);
-    if (isOwnGroup) {
-      if (!existingBm) {
-        await BoardMembership.qm.createOne({
-          projectId: project.id,
-          boardId: board.id,
-          userId: user.id,
-          role: BoardMembership.Roles.EDITOR,
-        });
-      } else if (existingBm.role !== BoardMembership.Roles.EDITOR) {
-        await BoardMembership.qm.updateOne(existingBm.id, { role: BoardMembership.Roles.EDITOR });
-      }
-    } else if (existingBm) {
-      // Revoke membership left over from the old all-shared behavior.
-      await BoardMembership.qm.destroyOne(existingBm.id);
-    }
-  };
-
   const ensureSharedAccess = async (user, userGroupId) => {
     if (!user || !user.id || !userGroupId) return;
     if (typeof Project === 'undefined' || !Project.qm || typeof ProjectManager === 'undefined') {
@@ -118,51 +100,35 @@ module.exports = function defineMem0AuthHook(sails) {
     if (now - last < MEMBERSHIP_TTL_MS) return;
 
     try {
-      const projects = (await Project.qm.getShared()) || [];
-      const runQuery = (sql, values) => sails.sendNativeQuery(sql, values);
-
-      // Remove project-manager grants from the old all-shared behavior (shared
-      // projects can span multiple groups; board memberships are the only path).
-      const projectManagers = (await ProjectManager.qm.getByUserId(user.id)) || [];
-      await Promise.all(projectManagers.map((pm) => ProjectManager.qm.destroyOne(pm.id)));
-
-      // eslint-disable-next-line no-restricted-syntax
-      for (const project of projects) {
-        // eslint-disable-next-line no-await-in-loop
-        const boards = (await Board.qm.getByProjectIds([project.id])) || [];
-        if (boards.length > 0) {
-          // eslint-disable-next-line no-await-in-loop
-          const boardGroupIds = await getBoardGroupIds(runQuery, boards);
-          // eslint-disable-next-line no-restricted-syntax
-          for (const board of boards) {
-            if (userGroupId === '*') {
-              // eslint-disable-next-line no-await-in-loop
-              const existingBm = await BoardMembership.qm.getOneByBoardIdAndUserId(
-                board.id,
-                user.id,
-              );
-              if (!existingBm) {
-                // eslint-disable-next-line no-await-in-loop
-                await BoardMembership.qm.createOne({
-                  projectId: project.id,
-                  boardId: board.id,
-                  userId: user.id,
-                  role: BoardMembership.Roles.EDITOR,
-                });
-              }
-            } else {
-              // eslint-disable-next-line no-await-in-loop
-              await reconcileBoardMembership(
-                user,
-                board,
-                project,
-                boardGroupIds[String(board.id)],
-                userGroupId,
-              );
-            }
-          }
-        }
+      const outcome = await ensureSharedAccessForGroup({
+        user,
+        userGroupId,
+        models: {
+          Project,
+          Board,
+          BoardMembership,
+          ProjectManager,
+          // Limpeza da revogação (inscrições/cards/tasks), como em board-memberships/delete-one.
+          BoardSubscription,
+          Card,
+          CardSubscription,
+          CardMembership,
+          TaskList,
+          Task,
+        },
+        runQuery: (sql, values) => sails.sendNativeQuery(sql, values),
+        internalAdminEmail: process.env.DEFAULT_ADMIN_EMAIL,
+        internalUserId: typeof User !== 'undefined' && User.INTERNAL ? User.INTERNAL.id : null,
+        sockets: sails.sockets,
+      });
+      if (outcome.errors.length > 0) {
+        sails.log.warn(
+          `mem0-auth: shared access partially reconciled for user ${user.id}:`,
+          outcome.errors.join('; '),
+        );
       }
+      // Memoriza mesmo com falha parcial (reconciliação é cara); o TTL curto
+      // garante nova tentativa em ~30s.
       membershipEnsuredAt.set(user.id, now);
     } catch (err) {
       sails.log.warn('mem0-auth: failed to ensure shared access:', err.message);
@@ -274,6 +240,12 @@ module.exports = function defineMem0AuthHook(sails) {
               req.currentUser = jwtUser;
               if (jwtUser.language && typeof req.setLocale === 'function') {
                 req.setLocale(jwtUser.language);
+              }
+              // Igual à sessão nativa (current-user): sem a sala `@user:<id>`,
+              // removeRoomMembersFromRooms não tira o socket do embed de
+              // `board:<id>` quando a membership é revogada.
+              if (req.isSocket) {
+                sails.sockets.join(req, `@user:${jwtUser.id}`);
               }
               return next();
             }

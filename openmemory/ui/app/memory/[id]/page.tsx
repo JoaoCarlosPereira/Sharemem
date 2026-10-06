@@ -1,7 +1,8 @@
 "use client";
 
 import "@/styles/animation.css";
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
+import { useApiSessionSettled } from "@/hooks/useApiSessionReady";
 import { useMemoriesApi } from "@/hooks/useMemoriesApi";
 import { use } from "react";
 import { MemorySkeleton } from "@/skeleton/MemorySkeleton";
@@ -18,18 +19,22 @@ function MemoryContent({ id }: { id: string }) {
     (state: RootState) => state.memories.selectedMemory
   );
 
-  useEffect(() => {
-    const loadMemory = async () => {
-      try {
-        await fetchMemoryById(id);
-      } catch (err) {
-        console.error("Failed to load memory:", err);
-      }
-    };
-    loadMemory();
-  }, []);
+  const sessionSettled = useApiSessionSettled();
+  // Uma única leitura (= uma linha de auditoria) por memória aberta, e só depois
+  // que a sessão estiver decidida — senão o Bearer ainda não foi anexado e o
+  // usuário logado seria gravado como "Interface Web (sem login)".
+  const fetchedId = useRef<string | null>(null);
 
-  if (isLoading) {
+  useEffect(() => {
+    if (!sessionSettled || fetchedId.current === id) return;
+    fetchedId.current = id;
+    fetchMemoryById(id).catch((err) => {
+      console.error("Failed to load memory:", err);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id, sessionSettled]);
+
+  if (!sessionSettled || fetchedId.current !== id || isLoading) {
     return <MemorySkeleton />;
   }
 
@@ -37,7 +42,7 @@ function MemoryContent({ id }: { id: string }) {
     return <NotFound message={error} />;
   }
 
-  if (!memory) {
+  if (!memory || memory.id !== id) {
     return <NotFound message="Memória não encontrada" statusCode={404} />;
   }
 

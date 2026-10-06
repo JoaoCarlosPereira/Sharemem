@@ -2,6 +2,7 @@ from .governance import router as governance_router
 from .governance_project_merge import router as governance_project_merge_router
 from .governance_schedule import router as governance_schedule_router
 from .admin import router as admin_router
+from .admin_autodedup import router as admin_autodedup_router
 from .admin_write_queue import router as admin_write_queue_router
 from .agent_tokens import router as agent_tokens_router
 from .apps import router as apps_router
@@ -25,6 +26,7 @@ from .store import router as store_router
 
 __all__ = [
     "admin_router",
+    "admin_autodedup_router",
     "admin_write_queue_router",
     "agent_tokens_router",
     "auth_router",

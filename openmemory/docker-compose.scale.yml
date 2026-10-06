@@ -15,6 +15,11 @@ x-api-common: &api-common
   build:
     context: ..
     dockerfile: openmemory/api/Dockerfile
+    # Rerank local opcional (card 80110071; docs/runbooks/rerank.md). Default 0 =
+    # imagem sem torch. O provider liga por MEM0_RERANKER_* em api/.env.
+    args:
+      INSTALL_RERANK: ${INSTALL_RERANK:-0}
+      RERANK_PRELOAD_MODEL: ${RERANK_PRELOAD_MODEL:-}
   restart: unless-stopped
   extra_hosts:
     - "host.docker.internal:host-gateway"
@@ -31,6 +36,8 @@ x-api-common: &api-common
     MEM0_PROJECT_GROUPS: ${MEM0_PROJECT_GROUPS:-sysmo-s1=sysmovs,sysmos1-modular,db-sysmo-s1}
     # Dedup semantica apos a escrita (PR #19). 'report' apenas registra em log
     # o que superseria, sem alterar dado; passar para 'apply' so apos calibrar.
+    # Relatorio consultavel: GET /admin/autodedup/report (tabela autodedup_reports);
+    # ver docs/runbooks/autodedup-calibration.md.
     MEM0_AUTODEDUP_MODE: ${MEM0_AUTODEDUP_MODE:-report}
     QDRANT_HOST: mem0_store
     QDRANT_PORT: "6333"
@@ -215,6 +222,17 @@ services:
       timeout: 5s
       retries: 3
       start_period: 90s
+    # Prometheus em modo multiprocesso (docs/runbooks/prometheus-metrics.md):
+    # /metrics agrega os arquivos de todos os processos Python deste container
+    # (alembic, workers do uvicorn, worker embutido). Diretório próprio em
+    # tmpfs — não é volume nomeado, não persiste entre recriações e não é
+    # compartilhado com outros serviços; o entrypoint da imagem o limpa antes
+    # de iniciar qualquer processo Python.
+    environment:
+      <<: *api-env
+      PROMETHEUS_MULTIPROC_DIR: /tmp/prometheus-multiproc
+    tmpfs:
+      - /tmp/prometheus-multiproc:size=64m
     command: >
       sh -c "alembic upgrade head && exec uvicorn main:app --host 0.0.0.0 --port 8765 --workers 1 --no-access-log"
 
@@ -336,8 +354,11 @@ services:
       # (não passam pelo sed de NEXT_PUBLIC_* do entrypoint): defina no .env.
       # NEXTAUTH_URL deve ser a URL da UI acessível na LAN (ex.: http://IP:3000).
       # ADMIN_TOKEN: só no container (nunca NEXT_PUBLIC_*). O /api-proxy injeta
-      # X-Admin-Token em mutações /admin/* quando a UI está em modo legado sem
-      # sessão Google — senão Backup/Restore/etc. falham com 401.
+      # X-Admin-Token em mutações /admin/* e em /api/v1/config/* (todos os
+      # métodos) SÓ em UI legado (AUTH_UI_REQUIRED=0) — senão Backup/Restore/
+      # Configurações falham com 401. Com login Google, usa o Bearer da sessão.
+      # Em legado, quem alcança a porta 3000 ganha esse acesso: em produção use
+      # AUTH_UI_REQUIRED=1 (ver docs/runbooks/auth-secrets.md).
       - ADMIN_TOKEN=${ADMIN_TOKEN:-}
       - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}
       - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET:-}

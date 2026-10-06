@@ -45,11 +45,20 @@ def count_collection_memories() -> int:
         return 0
 
 
-def count_project_memories(project: str) -> int:
-    """Count points for a single project via the tenant ``project`` payload field."""
-    _, vs = _vector_store()
+class VectorStoreUnavailable(RuntimeError):
+    """Qdrant could not answer; callers must not read this as "0 memories"."""
+
+
+def count_project_memories_strict(project: str, vs=None) -> int:
+    """Like :func:`count_project_memories` but raises instead of returning 0.
+
+    Use where a false 0 is harmful (merge decisions, reconciliation reports).
+    ``vs`` overrides the global vector store (e.g. the worker's client).
+    """
     if vs is None:
-        return 0
+        _, vs = _vector_store()
+    if vs is None:
+        raise VectorStoreUnavailable("memory client unavailable")
     try:
         filt = vs._create_filter({"project": project})
         return vs.client.count(
@@ -57,9 +66,43 @@ def count_project_memories(project: str) -> int:
             count_filter=filt,
             exact=True,
         ).count
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        raise VectorStoreUnavailable(f"failed to count memories for {project}: {exc}") from exc
+
+
+def count_project_memories(project: str) -> int:
+    """Count points for a single project via the tenant ``project`` payload field.
+
+    Returns 0 on Qdrant errors (dashboard-friendly); see
+    :func:`count_project_memories_strict` for the raising variant.
+    """
+    try:
+        return count_project_memories_strict(project)
+    except VectorStoreUnavailable:
         logger.exception("failed to count memories for project %s", project)
         return 0
+
+
+def facet_project_counts(limit: int = 10_000) -> dict[str, int]:
+    """Distinct ``payload.project`` values with point counts (Qdrant facet).
+
+    Uses the keyword payload index on ``project`` — cost is proportional to the
+    number of distinct projects, not to the number of points. Raises
+    :class:`VectorStoreUnavailable` on any error.
+    """
+    _, vs = _vector_store()
+    if vs is None:
+        raise VectorStoreUnavailable("memory client unavailable")
+    try:
+        response = vs.client.facet(
+            collection_name=vs.collection_name,
+            key="project",
+            limit=limit,
+            exact=True,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise VectorStoreUnavailable(f"failed to facet payload.project: {exc}") from exc
+    return {str(hit.value): int(hit.count) for hit in getattr(response, "hits", None) or []}
 
 
 def count_memories_last_24h() -> int:

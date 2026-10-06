@@ -47,7 +47,29 @@ if [ -z "$FRONTEND_PORT" ]; then
   exit 1
 fi
 
+# ADMIN_TOKEN: /api/v1/config exige admin (require_admin). Sem ele a API
+# responde 401 a tudo de config (seed do vector store e tela Configurações).
+# Se ausente, gera um forte e grava em .openmemory-admin-token (chmod 600).
+ADMIN_TOKEN="${ADMIN_TOKEN:-}"
+ADMIN_TOKEN_FILE="${ADMIN_TOKEN_FILE:-$(pwd)/.openmemory-admin-token}"
+if [ -z "$ADMIN_TOKEN" ] && [ -s "$ADMIN_TOKEN_FILE" ]; then
+  ADMIN_TOKEN="$(tr -d '[:space:]' < "$ADMIN_TOKEN_FILE")"
+  echo "🔑 Using ADMIN_TOKEN from ${ADMIN_TOKEN_FILE}"
+fi
+if [ -z "$ADMIN_TOKEN" ]; then
+  if ! command -v openssl >/dev/null 2>&1; then
+    echo "❌ ADMIN_TOKEN not set and openssl not found to generate one. Run with ADMIN_TOKEN=<token> bash run.sh"
+    exit 1
+  fi
+  ADMIN_TOKEN="$(openssl rand -hex 32)"
+  ( umask 077 && printf '%s\n' "$ADMIN_TOKEN" > "$ADMIN_TOKEN_FILE" )
+  chmod 600 "$ADMIN_TOKEN_FILE"
+  echo "🔑 ADMIN_TOKEN not set: generated a new one and saved it to ${ADMIN_TOKEN_FILE} (mode 600)."
+  echo "   Use it as the X-Admin-Token header for /admin/* and /api/v1/config."
+fi
+
 # Export required variables for Compose and frontend
+export ADMIN_TOKEN
 export OPENAI_API_KEY
 export USER
 export NEXT_PUBLIC_API_URL
@@ -109,6 +131,7 @@ create_compose_file() {
     environment:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - USER=${USER}
+      - ADMIN_TOKEN=\${ADMIN_TOKEN}
 EOF
 
   # Add vector store specific environment variables
@@ -266,111 +289,77 @@ done
 # Install vector store specific packages
 install_vector_store_packages "$VECTOR_STORE"
 
+# Header X-Admin-Token via arquivo temporário (chmod 600) lido com
+# ``curl -H @arquivo`` — o token nunca aparece na linha de comando (``ps``).
+ADMIN_HEADER_FILE="$(mktemp)"
+chmod 600 "$ADMIN_HEADER_FILE"
+trap 'rm -f "$ADMIN_HEADER_FILE"' EXIT
+printf 'X-Admin-Token: %s\n' "$ADMIN_TOKEN" > "$ADMIN_HEADER_FILE"
+
+# Prontidão: qualquer resposta HTTP de /api/v1/config (inclusive 401) significa
+# "API no ar". Não manda o token (não precisa).
+api_is_up() {
+  local code
+  code="$(curl -sS --connect-timeout 3 --max-time 5 -o /dev/null -w '%{http_code}' "${NEXT_PUBLIC_API_URL}/api/v1/config" 2>/dev/null || true)"
+  case "$code" in
+    2??|401|403) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+wait_for_api() {
+  echo "⏳ Waiting for API to be ready at ${NEXT_PUBLIC_API_URL}..."
+  for _ in {1..60}; do
+    if api_is_up; then
+      return 0
+    fi
+    sleep 1
+  done
+  echo "⚠️  API did not answer at ${NEXT_PUBLIC_API_URL} after 60s."
+  return 1
+}
+
+# Grava mem0.vector_store via PUT autenticado. Falha é avisada (não engolida).
+seed_vector_store() {
+  local store="$1" body="$2" out code
+  wait_for_api || true
+  echo "🧩 Configuring vector store (${store}) in backend..."
+  out="$(mktemp)"
+  code="$(curl -sS --connect-timeout 3 --max-time 15 -o "$out" -w '%{http_code}' -X PUT \
+    "${NEXT_PUBLIC_API_URL}/api/v1/config/mem0/vector_store" \
+    -H @"$ADMIN_HEADER_FILE" \
+    -H 'Content-Type: application/json' \
+    -d "$body" 2>/dev/null || true)"
+  if [ "${code:0:1}" = "2" ]; then
+    echo "✅ Vector store (${store}) configured."
+  else
+    echo "⚠️  WARNING: failed to configure vector store (${store}) — HTTP ${code:-000}."
+    case "$code" in
+      401|403) echo "   The API rejected ADMIN_TOKEN. Check that the openmemory-mcp container got the same ADMIN_TOKEN (${ADMIN_TOKEN_FILE})." ;;
+    esac
+    head -c 500 "$out" 2>/dev/null; echo
+    echo "   Configure it later in the UI (Configurações) or retry the PUT with X-Admin-Token."
+  fi
+  rm -f "$out"
+}
+
 # If a specific vector store is selected, seed the backend config accordingly
 if [ "$VECTOR_STORE" = "milvus" ]; then
-  echo "⏳ Waiting for API to be ready at ${NEXT_PUBLIC_API_URL}..."
-  for i in {1..60}; do
-    if curl -fsS "${NEXT_PUBLIC_API_URL}/api/v1/config" >/dev/null 2>&1; then
-      break
-    fi
-    sleep 1
-  done
-
-  echo "🧩 Configuring vector store (milvus) in backend..."
-  curl -fsS -X PUT "${NEXT_PUBLIC_API_URL}/api/v1/config/mem0/vector_store" \
-    -H 'Content-Type: application/json' \
-    -d "{\"provider\":\"milvus\",\"config\":{\"collection_name\":\"openmemory\",\"embedding_model_dims\":${EMBEDDING_DIMS},\"url\":\"http://mem0_store:19530\",\"token\":\"\",\"db_name\":\"\",\"metric_type\":\"COSINE\"}}" >/dev/null || true
+  seed_vector_store milvus "{\"provider\":\"milvus\",\"config\":{\"collection_name\":\"openmemory\",\"embedding_model_dims\":${EMBEDDING_DIMS},\"url\":\"http://mem0_store:19530\",\"token\":\"\",\"db_name\":\"\",\"metric_type\":\"COSINE\"}}"
 elif [ "$VECTOR_STORE" = "weaviate" ]; then
-  echo "⏳ Waiting for API to be ready at ${NEXT_PUBLIC_API_URL}..."
-  for i in {1..60}; do
-    if curl -fsS "${NEXT_PUBLIC_API_URL}/api/v1/config" >/dev/null 2>&1; then
-      break
-    fi
-    sleep 1
-  done
-
-  echo "🧩 Configuring vector store (weaviate) in backend..."
-  curl -fsS -X PUT "${NEXT_PUBLIC_API_URL}/api/v1/config/mem0/vector_store" \
-    -H 'Content-Type: application/json' \
-    -d "{\"provider\":\"weaviate\",\"config\":{\"collection_name\":\"openmemory\",\"embedding_model_dims\":${EMBEDDING_DIMS},\"cluster_url\":\"http://mem0_store:8080\"}}" >/dev/null || true
+  seed_vector_store weaviate "{\"provider\":\"weaviate\",\"config\":{\"collection_name\":\"openmemory\",\"embedding_model_dims\":${EMBEDDING_DIMS},\"cluster_url\":\"http://mem0_store:8080\"}}"
 elif [ "$VECTOR_STORE" = "redis" ]; then
-  echo "⏳ Waiting for API to be ready at ${NEXT_PUBLIC_API_URL}..."
-  for i in {1..60}; do
-    if curl -fsS "${NEXT_PUBLIC_API_URL}/api/v1/config" >/dev/null 2>&1; then
-      break
-    fi
-    sleep 1
-  done
-
-  echo "🧩 Configuring vector store (redis) in backend..."
-  curl -fsS -X PUT "${NEXT_PUBLIC_API_URL}/api/v1/config/mem0/vector_store" \
-    -H 'Content-Type: application/json' \
-    -d "{\"provider\":\"redis\",\"config\":{\"collection_name\":\"openmemory\",\"embedding_model_dims\":${EMBEDDING_DIMS},\"redis_url\":\"redis://mem0_store:6379\"}}" >/dev/null || true
+  seed_vector_store redis "{\"provider\":\"redis\",\"config\":{\"collection_name\":\"openmemory\",\"embedding_model_dims\":${EMBEDDING_DIMS},\"redis_url\":\"redis://mem0_store:6379\"}}"
 elif [ "$VECTOR_STORE" = "pgvector" ]; then
-  echo "⏳ Waiting for API to be ready at ${NEXT_PUBLIC_API_URL}..."
-  for i in {1..60}; do
-    if curl -fsS "${NEXT_PUBLIC_API_URL}/api/v1/config" >/dev/null 2>&1; then
-      break
-    fi
-    sleep 1
-  done
-
-  echo "🧩 Configuring vector store (pgvector) in backend..."
-  curl -fsS -X PUT "${NEXT_PUBLIC_API_URL}/api/v1/config/mem0/vector_store" \
-    -H 'Content-Type: application/json' \
-    -d "{\"provider\":\"pgvector\",\"config\":{\"collection_name\":\"openmemory\",\"embedding_model_dims\":${EMBEDDING_DIMS},\"dbname\":\"mem0\",\"user\":\"mem0\",\"password\":\"mem0\",\"host\":\"mem0_store\",\"port\":5432,\"diskann\":false,\"hnsw\":true}}" >/dev/null || true
+  seed_vector_store pgvector "{\"provider\":\"pgvector\",\"config\":{\"collection_name\":\"openmemory\",\"embedding_model_dims\":${EMBEDDING_DIMS},\"dbname\":\"mem0\",\"user\":\"mem0\",\"password\":\"mem0\",\"host\":\"mem0_store\",\"port\":5432,\"diskann\":false,\"hnsw\":true}}"
 elif [ "$VECTOR_STORE" = "qdrant" ]; then
-  echo "⏳ Waiting for API to be ready at ${NEXT_PUBLIC_API_URL}..."
-  for i in {1..60}; do
-    if curl -fsS "${NEXT_PUBLIC_API_URL}/api/v1/config" >/dev/null 2>&1; then
-      break
-    fi
-    sleep 1
-  done
-
-  echo "🧩 Configuring vector store (qdrant) in backend..."
-  curl -fsS -X PUT "${NEXT_PUBLIC_API_URL}/api/v1/config/mem0/vector_store" \
-    -H 'Content-Type: application/json' \
-    -d "{\"provider\":\"qdrant\",\"config\":{\"collection_name\":\"openmemory\",\"embedding_model_dims\":${EMBEDDING_DIMS},\"host\":\"mem0_store\",\"port\":6333}}" >/dev/null || true
+  seed_vector_store qdrant "{\"provider\":\"qdrant\",\"config\":{\"collection_name\":\"openmemory\",\"embedding_model_dims\":${EMBEDDING_DIMS},\"host\":\"mem0_store\",\"port\":6333}}"
 elif [ "$VECTOR_STORE" = "chroma" ]; then
-  echo "⏳ Waiting for API to be ready at ${NEXT_PUBLIC_API_URL}..."
-  for i in {1..60}; do
-    if curl -fsS "${NEXT_PUBLIC_API_URL}/api/v1/config" >/dev/null 2>&1; then
-      break
-    fi
-    sleep 1
-  done
-
-  echo "🧩 Configuring vector store (chroma) in backend..."
-  curl -fsS -X PUT "${NEXT_PUBLIC_API_URL}/api/v1/config/mem0/vector_store" \
-    -H 'Content-Type: application/json' \
-    -d "{\"provider\":\"chroma\",\"config\":{\"collection_name\":\"openmemory\",\"host\":\"mem0_store\",\"port\":8000}}" >/dev/null || true
+  seed_vector_store chroma "{\"provider\":\"chroma\",\"config\":{\"collection_name\":\"openmemory\",\"host\":\"mem0_store\",\"port\":8000}}"
 elif [ "$VECTOR_STORE" = "elasticsearch" ]; then
-  echo "⏳ Waiting for API to be ready at ${NEXT_PUBLIC_API_URL}..."
-  for i in {1..60}; do
-    if curl -fsS "${NEXT_PUBLIC_API_URL}/api/v1/config" >/dev/null 2>&1; then
-      break
-    fi
-    sleep 1
-  done
-
-  echo "🧩 Configuring vector store (elasticsearch) in backend..."
-  curl -fsS -X PUT "${NEXT_PUBLIC_API_URL}/api/v1/config/mem0/vector_store" \
-    -H 'Content-Type: application/json' \
-    -d "{\"provider\":\"elasticsearch\",\"config\":{\"collection_name\":\"openmemory\",\"embedding_model_dims\":${EMBEDDING_DIMS},\"host\":\"http://mem0_store\",\"port\":9200,\"user\":\"elastic\",\"password\":\"changeme\",\"verify_certs\":false,\"use_ssl\":false}}" >/dev/null || true
+  seed_vector_store elasticsearch "{\"provider\":\"elasticsearch\",\"config\":{\"collection_name\":\"openmemory\",\"embedding_model_dims\":${EMBEDDING_DIMS},\"host\":\"http://mem0_store\",\"port\":9200,\"user\":\"elastic\",\"password\":\"changeme\",\"verify_certs\":false,\"use_ssl\":false}}"
 elif [ "$VECTOR_STORE" = "faiss" ]; then
-  echo "⏳ Waiting for API to be ready at ${NEXT_PUBLIC_API_URL}..."
-  for i in {1..60}; do
-    if curl -fsS "${NEXT_PUBLIC_API_URL}/api/v1/config" >/dev/null 2>&1; then
-      break
-    fi
-    sleep 1
-  done
-
-  echo "🧩 Configuring vector store (faiss) in backend..."
-  curl -fsS -X PUT "${NEXT_PUBLIC_API_URL}/api/v1/config/mem0/vector_store" \
-    -H 'Content-Type: application/json' \
-    -d "{\"provider\":\"faiss\",\"config\":{\"collection_name\":\"openmemory\",\"embedding_model_dims\":${EMBEDDING_DIMS},\"path\":\"/tmp/faiss\",\"distance_strategy\":\"cosine\"}}" >/dev/null || true
+  seed_vector_store faiss "{\"provider\":\"faiss\",\"config\":{\"collection_name\":\"openmemory\",\"embedding_model_dims\":${EMBEDDING_DIMS},\"path\":\"/tmp/faiss\",\"distance_strategy\":\"cosine\"}}"
 fi
 
 # Start the frontend
@@ -380,10 +369,12 @@ docker run -d \
   -p ${FRONTEND_PORT}:3000 \
   -e NEXT_PUBLIC_API_URL="$NEXT_PUBLIC_API_URL" \
   -e NEXT_PUBLIC_USER_ID="$USER" \
+  -e ADMIN_TOKEN \
   mem0/openmemory-ui:latest
 
 echo "✅ Backend:  http://localhost:8765"
 echo "✅ Frontend: http://localhost:$FRONTEND_PORT"
+echo "🔑 ADMIN_TOKEN: passed to API and UI containers (stored in ${ADMIN_TOKEN_FILE} when generated)."
 
 # Open the frontend URL in the default web browser
 echo "🌐 Opening frontend in the default browser..."

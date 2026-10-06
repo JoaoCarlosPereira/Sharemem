@@ -149,6 +149,7 @@ const moment = require('moment');
 
 const { isId } = require('../../../utils/validators');
 const { idInput, idsInput } = require('../../../utils/inputs');
+const { hasAdminAccessToSharedProject } = require('../../../utils/mem0-group-scope');
 
 const Errors = {
   LIST_NOT_FOUND: {
@@ -204,7 +205,7 @@ module.exports = {
       .getPathToProjectById(inputs.listId)
       .intercept('pathNotFound', () => Errors.LIST_NOT_FOUND);
 
-    if (currentUser.role !== User.Roles.ADMIN || project.ownerProjectManagerId) {
+    if (!hasAdminAccessToSharedProject(this.req, project)) {
       const isProjectManager = await sails.helpers.users.isProjectManager(
         currentUser.id,
         project.id,

@@ -83,6 +83,8 @@ class SpecTaskTimeoutWorker:
             db.query(TaskCard)
             .filter(
                 TaskCard.status == TaskCardStatus.em_andamento,
+                # Arquivado está fora do fluxo: não há lease a expirar.
+                TaskCard.archived_at.is_(None),
                 TaskCard.last_activity_at.isnot(None),
                 TaskCard.last_activity_at < cutoff,
             )

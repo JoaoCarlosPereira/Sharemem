@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from uuid import uuid4
 
@@ -510,7 +511,7 @@ async def test_mirror_assignee_prefers_linked_google_email(db_session, monkeypat
     )
 
     client = CaptureClient(db_session)
-    await client._mirror_task_assignee(task, "card-1")
+    await client._mirror_task_assignee(task, "1001")
     assert calls
     body = calls[0][2]
     assert body["email"] == "joaocarlos@sysmo.com.br"
@@ -591,6 +592,35 @@ class TestSetProjectLifecycle:
         planka_router.fail_next = {"path": f"/api/projects/{project_row.planka_id}", "status": 404}
         # Não deve levantar — projeto removido direto no PLANKA, mapa órfão.
         await client.set_project_lifecycle(ws.id, is_archived=True, is_completed=True)
+
+    @pytest.mark.asyncio
+    async def test_404_on_mapped_project_logs_warning(
+        self, db_session, client, planka_router, caplog, monkeypatch
+    ):
+        """404 também ocorre quando DEFAULT_ADMIN não é gerente: logar, sem levantar."""
+        ws = _mk_workspace(db_session)
+        await client.ensure_workspace_board(ws.id)
+        project_row = (
+            db_session.query(SpecPlankaIdMap)
+            .filter_by(entity_type=ENTITY_PROJECT, spec_id=ws.id)
+            .one()
+        )
+        planka_router.fail_next = {"path": f"/api/projects/{project_row.planka_id}", "status": 404}
+
+        # Outros testes da suíte mexem no logging global (propagate/disabled);
+        # fixa o logger do módulo para o caplog capturar de forma determinística.
+        planka_logger = logging.getLogger("app.utils.planka")
+        monkeypatch.setattr(planka_logger, "disabled", False)
+        monkeypatch.setattr(planka_logger, "propagate", True)
+        with caplog.at_level(logging.WARNING, logger="app.utils.planka"):
+            await client.set_project_lifecycle(ws.id, is_archived=True, is_completed=True)
+
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        message = warnings[0].getMessage()
+        assert project_row.planka_id in message
+        assert "DEFAULT_ADMIN_EMAIL" in message
+        assert "project_manager" in message
 
 
 class TestPlankaErrors:

@@ -160,6 +160,14 @@ module.exports = function defineCurrentUserHook(sails) {
                       const user = await User.qm.getOneByEmail(email);
                       if (user && !user.isDeactivated) {
                         req.currentUser = user;
+                        // Mesmo formato do mem0-auth: o escopo por grupo
+                        // (hasAdminAccessToSharedProject) depende dele.
+                        req.mem0Auth = {
+                          method: 'jwt',
+                          subject: payload.sub ? String(payload.sub) : undefined,
+                          email,
+                          group: payload.group ? String(payload.group) : undefined,
+                        };
                       }
                     }
                   }
