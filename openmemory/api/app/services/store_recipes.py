@@ -26,6 +26,7 @@ RECIPE_VERSION = "1"
 
 SKILL_ARTIFACT_MEDIA_TYPE = "application/vnd.agentregistry.skill.v1.tar+gzip"
 HOOK_ARTIFACT_MEDIA_TYPE = "application/vnd.agentregistry.hook.v1.tar+gzip"
+PLUGIN_ARTIFACT_MEDIA_TYPE = "application/vnd.agentregistry.plugin.v1.tar+gzip"
 
 # Placeholder a hook command uses to reach a file shipped in its own package.
 # The host expands it to the directory the package was extracted into, which is

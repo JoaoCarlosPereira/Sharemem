@@ -44,6 +44,7 @@ REGISTRY_KIND_TO_CATALOG_KIND: dict[str, str] = {
 PACKAGE_MEDIA_TYPES: dict[str, str] = {
     "skill": "application/vnd.agentregistry.skill.v1.tar+gzip",
     "hook": "application/vnd.agentregistry.hook.v1.tar+gzip",
+    "plugin": "application/vnd.agentregistry.plugin.v1.tar+gzip",
 }
 
 

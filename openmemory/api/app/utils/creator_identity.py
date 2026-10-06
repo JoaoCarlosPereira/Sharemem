@@ -49,22 +49,27 @@ def resolve_creator_identities_with_db(
     from app.models import Machine, MachineStatus, User
 
     try:
-        rows = (
-            db.query(
-                Machine.hostname,
-                User.display_name,
-                User.avatar_url,
-                User.name,
-                User.email,
+        # This lookup is optional enrichment. If a rolling deployment leaves
+        # identity tables/columns temporarily out of sync, PostgreSQL marks the
+        # current transaction as failed after the SELECT error. Keep that error
+        # inside a savepoint so the caller can continue its primary read.
+        with db.begin_nested():
+            rows = (
+                db.query(
+                    Machine.hostname,
+                    User.display_name,
+                    User.avatar_url,
+                    User.name,
+                    User.email,
+                )
+                .join(User, Machine.linked_user_id == User.id)
+                .filter(
+                    Machine.hostname.in_(keys),
+                    Machine.status == MachineStatus.linked,
+                    Machine.linked_user_id.isnot(None),
+                )
+                .all()
             )
-            .join(User, Machine.linked_user_id == User.id)
-            .filter(
-                Machine.hostname.in_(keys),
-                Machine.status == MachineStatus.linked,
-                Machine.linked_user_id.isnot(None),
-            )
-            .all()
-        )
         return {
             hostname: CreatorIdentity(
                 display_name=display_name or name,
@@ -247,7 +252,10 @@ def resolve_actor_identities_with_db(
 
         users: list[User] = []
         if clauses:
-            users = db.query(User).filter(or_(*clauses)).all()
+            # Like hostname enrichment above, this is display-only data. A
+            # schema mismatch must not poison the session used by list_tasks.
+            with db.begin_nested():
+                users = db.query(User).filter(or_(*clauses)).all()
 
         # Deduplicate by id while registering all lookup aliases.
         seen_user_ids: set[Any] = set()
