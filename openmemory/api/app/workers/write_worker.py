@@ -100,6 +100,9 @@ DEFAULT_HEARTBEAT_INTERVAL_SEC = 15.0
 # How often the side recovery/heartbeat loop runs (independent of process_once).
 DEFAULT_SIDE_LOOP_INTERVAL_SEC = 15.0
 
+STARTUP_RETRY_INITIAL_SEC = 1.0
+STARTUP_RETRY_MAX_SEC = 30.0
+
 
 
 
@@ -575,9 +578,7 @@ class WriteWorker:
 
     async def run(self) -> None:
         """Run the consume loop until :meth:`stop` is requested."""
-        recovered = self._queue.recover_stale_processing()
-        if recovered:
-            logger.info("recovered %s stale processing jobs -> queued", recovered)
+        await self._startup_recovery()
         self._recover_failed_jobs()
         self._log_llm_startup_status()
         logger.info(
@@ -614,6 +615,28 @@ class WriteWorker:
                 except asyncio.TimeoutError:
                     pass
         logger.info("write worker stopped")
+
+    async def _startup_recovery(self) -> None:
+        delay = STARTUP_RETRY_INITIAL_SEC
+        while not self._stopped.is_set():
+            try:
+                recovered = self._queue.recover_stale_processing()
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "startup recovery failed (database unreachable?); "
+                    "retrying in %.0fs",
+                    delay,
+                    exc_info=True,
+                )
+                try:
+                    await asyncio.wait_for(self._stopped.wait(), timeout=delay)
+                except asyncio.TimeoutError:
+                    pass
+                delay = min(delay * 2, STARTUP_RETRY_MAX_SEC)
+                continue
+            if recovered:
+                logger.info("recovered %s stale processing jobs -> queued", recovered)
+            return
 
     async def _side_loop(self) -> None:
         """Heartbeat + fail stuck processing even while a job is in flight."""

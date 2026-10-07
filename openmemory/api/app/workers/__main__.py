@@ -11,13 +11,14 @@ Runs the queue consumer as an independent process (ADR-003), sharing the same
 import asyncio
 import logging
 import signal
+import sys
 
 from app.workers.write_worker import worker_from_env
 
 logger = logging.getLogger(__name__)
 
 
-async def _run() -> None:
+async def _run() -> int:
     worker = worker_from_env()
     loop = asyncio.get_running_loop()
     stop_event = asyncio.Event()
@@ -32,14 +33,33 @@ async def _run() -> None:
         except NotImplementedError:
             signal.signal(sig, lambda *_: _request_stop())
 
-    worker.start()
-    await stop_event.wait()
-    await worker.stop()
+    run_task = worker.start()
+    stop_task = asyncio.create_task(stop_event.wait())
+    await asyncio.wait({run_task, stop_task}, return_when=asyncio.FIRST_COMPLETED)
+
+    exit_code = 0
+    if not stop_event.is_set():
+        stop_task.cancel()
+        error = None if run_task.cancelled() else run_task.exception()
+        logger.critical(
+            "write worker loop exited without a shutdown signal; exiting so "
+            "the container restarts",
+            exc_info=error,
+        )
+        exit_code = 1
+
+    try:
+        await worker.stop()
+    except Exception:  # noqa: BLE001
+        if exit_code == 0:
+            logger.exception("write worker stopped with an error")
+            exit_code = 1
+    return exit_code
 
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
-    asyncio.run(_run())
+    sys.exit(asyncio.run(_run()))
 
 
 if __name__ == "__main__":
