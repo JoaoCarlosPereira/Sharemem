@@ -580,6 +580,82 @@ class TestLifecycle:
 
         assert _status(db_path, job_id).status == WriteQueueStatus.done
 
+    @pytest.mark.asyncio
+    async def test_run_retries_startup_recovery_until_db_answers(
+        self, queue, db_path, monkeypatch
+    ):
+        import app.workers.write_worker as write_worker_mod
+
+        monkeypatch.setattr(write_worker_mod, "STARTUP_RETRY_INITIAL_SEC", 0.01)
+        client = _async_client()
+        real_recover = queue.recover_stale_processing
+        calls = {"n": 0}
+
+        def recover_failing_twice(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] <= 2:
+                raise RuntimeError("failed to resolve host 'pgbouncer'")
+            return real_recover(*args, **kwargs)
+
+        queue.recover_stale_processing = recover_failing_twice
+        worker = WriteWorker(queue=queue, client_provider=lambda: client,
+                             upsert_project=lambda *a, **k: None, idle_sleep=0.01)
+        job_id = queue.enqueue(_job())
+
+        with patch.object(worker, "_log_llm_startup_status"):
+            task = worker.start()
+            for _ in range(100):
+                await asyncio.sleep(0.01)
+                if _status(db_path, job_id).status == WriteQueueStatus.done:
+                    break
+            assert not task.done()
+            await worker.stop()
+
+        assert calls["n"] >= 3
+        assert _status(db_path, job_id).status == WriteQueueStatus.done
+
+    @pytest.mark.asyncio
+    async def test_stop_interrupts_startup_recovery_retries(self, queue):
+        queue.recover_stale_processing = MagicMock(
+            side_effect=RuntimeError("db down")
+        )
+        worker = WriteWorker(queue=queue, client_provider=lambda: None,
+                             upsert_project=lambda *a, **k: None)
+
+        task = worker.start()
+        await asyncio.sleep(0.05)
+        await asyncio.wait_for(worker.stop(), timeout=1)
+
+        assert task.done()
+
+
+class TestEntrypoint:
+    @pytest.mark.asyncio
+    async def test_exits_nonzero_when_run_loop_dies(self):
+        from app.workers import __main__ as entrypoint
+
+        class DyingWorker:
+            def __init__(self):
+                self.stopped = False
+
+            def start(self):
+                async def _die():
+                    raise RuntimeError("failed to resolve host 'pgbouncer'")
+
+                self._task = asyncio.create_task(_die())
+                return self._task
+
+            async def stop(self):
+                self.stopped = True
+                await self._task
+
+        worker = DyingWorker()
+        with patch.object(entrypoint, "worker_from_env", return_value=worker):
+            exit_code = await asyncio.wait_for(entrypoint._run(), timeout=1)
+
+        assert exit_code == 1
+        assert worker.stopped
+
 
 # --------------------------------------------------------------------------- #
 # mark_failed inner-failure isolation
