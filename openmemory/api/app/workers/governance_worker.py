@@ -27,6 +27,7 @@ from app.utils.governance_policy import (
 )
 from app.utils.governance_schedule import is_governance_schedule_active
 from app.utils.governance_queue import GovernanceJob, governance_queue
+from app.utils.logging_context import configure_process_logging
 from app.utils.metrics import (
     GOVERNANCE_JOB_ERRORS,
     GOVERNANCE_JOB_LATENCY,
@@ -382,7 +383,7 @@ async def _main() -> None:
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO)
+    configure_process_logging()
     asyncio.run(_main())
 
 

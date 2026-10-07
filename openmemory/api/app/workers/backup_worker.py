@@ -22,6 +22,7 @@ from app.database import SessionLocal
 from app.utils.backup import BackupService
 from app.utils.backup_archive import _REGULAR_RE, BackupArchive
 from app.utils.backup_policy import get_backup_policy_runtime
+from app.utils.logging_context import configure_process_logging
 
 logger = logging.getLogger(__name__)
 
@@ -151,7 +152,7 @@ async def _main() -> None:
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO)
+    configure_process_logging()
     asyncio.run(_main())
 
 
