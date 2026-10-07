@@ -210,3 +210,95 @@ async def test_disabled_process_stays_queued_until_reenabled(queue):
     row = db.query(GovernanceJob).filter_by(id=uuid.UUID(job_id)).one()
     assert row.status == GovernanceJobStatus.done
     db.close()
+
+
+@pytest.mark.asyncio
+async def test_run_retries_startup_recovery_until_db_answers(queue, monkeypatch):
+    import asyncio
+
+    from app.workers import governance_worker as gw
+
+    monkeypatch.setattr(gw, "STARTUP_RETRY_INITIAL_SEC", 0.01)
+    real_recover = queue.recover_stale_processing
+    calls = {"n": 0}
+
+    def recover_failing_twice(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            raise RuntimeError("failed to resolve host 'pgbouncer'")
+        return real_recover(*args, **kwargs)
+
+    queue.recover_stale_processing = recover_failing_twice
+    job_id = queue.enqueue("dedup", project="p1", payload={"manual": True})
+    handler = MagicMock(return_value=1)
+    worker = gw.GovernanceWorker(
+        queue=queue,
+        handlers={"dedup": handler},
+        enable_scheduler=False,
+        enforce_off_peak=False,
+        idle_sleep=0.01,
+        session_factory=queue._session_factory,
+    )
+
+    task = worker.start()
+    for _ in range(300):
+        await asyncio.sleep(0.01)
+        if handler.called:
+            break
+    assert not task.done()
+    await worker.stop()
+
+    assert calls["n"] >= 3
+    handler.assert_called_once()
+    assert job_id
+
+
+@pytest.mark.asyncio
+async def test_stop_interrupts_governance_startup_retries(queue):
+    import asyncio
+
+    from app.workers import governance_worker as gw
+
+    queue.recover_stale_processing = MagicMock(side_effect=RuntimeError("db down"))
+    worker = gw.GovernanceWorker(
+        queue=queue,
+        handlers={},
+        enable_scheduler=False,
+        session_factory=queue._session_factory,
+    )
+
+    task = worker.start()
+    await asyncio.sleep(0.05)
+    await asyncio.wait_for(worker.stop(), timeout=1)
+
+    assert task.done()
+
+
+@pytest.mark.asyncio
+async def test_governance_main_exits_nonzero_when_run_loop_dies():
+    import asyncio
+    from unittest.mock import patch
+
+    from app.workers import governance_worker as gw
+
+    class DyingWorker:
+        def __init__(self):
+            self.stopped = False
+
+        def start(self):
+            async def _die():
+                raise RuntimeError("failed to resolve host 'pgbouncer'")
+
+            self._task = asyncio.create_task(_die())
+            return self._task
+
+        async def stop(self):
+            self.stopped = True
+            await self._task
+
+    worker = DyingWorker()
+    with patch.object(gw, "worker_from_env", return_value=worker):
+        exit_code = await asyncio.wait_for(gw._main(), timeout=1)
+
+    assert exit_code == 1
+    assert worker.stopped

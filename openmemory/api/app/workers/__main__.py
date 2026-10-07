@@ -13,6 +13,7 @@ import logging
 import signal
 import sys
 
+from app.utils.logging_context import configure_process_logging
 from app.workers.write_worker import worker_from_env
 
 logger = logging.getLogger(__name__)
@@ -58,7 +59,7 @@ async def _run() -> int:
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO)
+    configure_process_logging()
     sys.exit(asyncio.run(_run()))
 
 

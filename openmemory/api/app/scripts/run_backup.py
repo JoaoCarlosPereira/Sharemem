@@ -8,10 +8,11 @@ bucket S3-compatível configurado por ambiente.
 import logging
 
 from app.utils.backup import BackupService
+from app.utils.logging_context import configure_process_logging
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO)
+    configure_process_logging()
     result = BackupService().run_backup()
     logging.getLogger(__name__).info(
         "backup ok: %s qdrant objetos, postgres=%s, %.1fs",
