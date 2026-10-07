@@ -1713,7 +1713,7 @@ async def claim_task(task_id: str) -> str:
                         enrich_status_payload(
                             {
                                 "claimed": True,
-                                "assignee": claimant,
+                                "assignee": result.current_assignee or claimant,
                                 "version": result.version,
                                 "status": status_after,
                                 # Prazo do lease: passado este ponto sem atividade, o

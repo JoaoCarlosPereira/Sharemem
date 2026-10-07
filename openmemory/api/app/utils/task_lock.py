@@ -94,6 +94,7 @@ def _assert_status_policy(
     task: TaskCard,
     new_status: TaskCardStatus,
     actor: str | None,
+    db: Session | None = None,
 ) -> None:
     """Garante exclusividade de claim: em_andamento só via claim; backlog só via release."""
     old_status = task.status
@@ -115,7 +116,12 @@ def _assert_status_policy(
             "use_release",
             "Use release_task para devolver a task ao backlog",
         )
-    if task.assignee and (not actor or actor != task.assignee):
+    assignee = (
+        _canonical_task_actor(db, task.assignee)
+        if db is not None and task.assignee
+        else task.assignee
+    )
+    if assignee and (not actor or actor.strip().casefold() != assignee.strip().casefold()):
         raise TaskStatusPolicyError(
             "not_assignee",
             f"Apenas o assignee ({task.assignee}) pode alterar o status",
@@ -124,6 +130,39 @@ def _assert_status_policy(
         assert_no_forward_skip(old_status, new_status)
     except KanbanSkipError as exc:
         raise TaskStatusPolicyError(exc.code, exc.message) from exc
+
+
+def _canonical_task_actor(db: Session | None, identity: str | None) -> str | None:
+    """Resolve a linked machine hostname to its person's email for task ownership."""
+    raw = (identity or "").strip()
+    if not raw or db is None:
+        return raw or None
+
+    try:
+        from app.models import Machine, MachineStatus, User
+        from app.utils.logging_context import auth_method_var, auth_user_var
+
+        with db.begin_nested():
+            machine = (
+                db.query(Machine)
+                .filter(sa.func.lower(Machine.hostname) == raw.lower())
+                .first()
+            )
+            if (
+                machine is None
+                or machine.status != MachineStatus.linked
+                or machine.linked_user_id is None
+            ):
+                return raw
+            if auth_method_var.get() in ("agent_token", "session"):
+                authenticated_user = (auth_user_var.get() or "").strip()
+                if authenticated_user != str(machine.linked_user_id):
+                    return raw
+            person = db.get(User, machine.linked_user_id)
+            email = (person.email or "").strip() if person is not None else ""
+            return email or raw
+    except Exception:  # noqa: BLE001 — preserve legacy behavior if identity lookup is unavailable
+        return raw
 
 
 def claim_task(db: Session, task_id: uuid.UUID, claimant: str) -> ClaimTaskResult:
@@ -167,13 +206,20 @@ def claim_task(db: Session, task_id: uuid.UUID, claimant: str) -> ClaimTaskResul
             archived=True,
         )
 
+    claimant = _canonical_task_actor(db, claimant) or ""
+    assignee = _canonical_task_actor(db, task.assignee) if task.assignee else None
+
     now = get_current_utc_time()
     old_status = task.status
     # Reassunção do próprio card: qualquer coluna serve como origem, desde que o
     # assignee gravado seja o chamador. A guarda vai no WHERE (não num if sobre o
     # objeto lido) para manter a atomicidade — entre o SELECT e o UPDATE outro
     # processo pode ter liberado ou reatribuído a task.
-    is_reclaim = task.assignee == claimant and old_status != TaskCardStatus.tasks
+    is_reclaim = (
+        assignee is not None
+        and assignee.casefold() == claimant.casefold()
+        and old_status != TaskCardStatus.tasks
+    )
     is_adopt = (
         not is_reclaim
         and task.assignee is None
@@ -183,7 +229,7 @@ def claim_task(db: Session, task_id: uuid.UUID, claimant: str) -> ClaimTaskResul
     if is_reclaim:
         guard = sa.and_(
             TaskCard.id == task_id,
-            TaskCard.assignee == claimant,
+            TaskCard.assignee == task.assignee,
         )
     elif is_adopt:
         # Atômico: só adota se continua sem dono e na mesma coluna.
@@ -281,6 +327,7 @@ def release_task(
     task = db.get(TaskCard, task_id)
     if task is None:
         raise ValueError(f"TaskCard {task_id} não encontrada")
+    actor = _canonical_task_actor(db, actor)
     if task.archived_at is not None:
         raise TaskStatusPolicyError(
             "archived",
@@ -379,6 +426,7 @@ def update_task_status(
     task = db.get(TaskCard, task_id)
     if task is None:
         raise ValueError(f"TaskCard {task_id} não encontrada")
+    actor = _canonical_task_actor(db, actor)
 
     if task.archived_at is not None:
         # Fora da política (vale também para enforce_policy=False do bridge
@@ -388,7 +436,7 @@ def update_task_status(
             "Card arquivado: use unarchive_task antes de mover de coluna",
         )
     if enforce_policy:
-        _assert_status_policy(task, new_status, actor)
+        _assert_status_policy(task, new_status, actor, db=db)
 
     old_status = task.status
     now = get_current_utc_time()
