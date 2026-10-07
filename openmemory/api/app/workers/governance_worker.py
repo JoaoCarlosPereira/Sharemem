@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import sys
 import time
 from datetime import UTC, datetime, timedelta
 from typing import Callable, Dict, Optional
@@ -46,6 +47,9 @@ DEFAULT_MAX_ATTEMPTS = 3
 # curfew check does not hit the DB (resolve_policy) on every batch. The window
 # has hour granularity, so a short TTL is plenty fresh.
 DEFAULT_WINDOW_CACHE_TTL = 60.0
+
+STARTUP_RETRY_INITIAL_SEC = 1.0
+STARTUP_RETRY_MAX_SEC = 30.0
 
 SCHEDULE_INTERVALS = {
     "daily": timedelta(days=1),
@@ -249,10 +253,30 @@ class GovernanceWorker:
                 logger.exception("governance scheduler pass failed")
             await self._wait(self._scheduler_sleep)
 
+    async def _startup_recovery(self) -> None:
+        delay = STARTUP_RETRY_INITIAL_SEC
+        while not self._stopped.is_set():
+            try:
+                recovered = self._queue.recover_stale_processing()
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "governance startup recovery failed (database unreachable?); "
+                    "retrying in %.0fs",
+                    delay,
+                    exc_info=True,
+                )
+                await self._wait(delay)
+                delay = min(delay * 2, STARTUP_RETRY_MAX_SEC)
+                continue
+            if recovered:
+                logger.info("recovered %s stale governance jobs", recovered)
+            return
+
     async def run(self) -> None:
-        recovered = self._queue.recover_stale_processing()
-        if recovered:
-            logger.info("recovered %s stale governance jobs", recovered)
+        await self._startup_recovery()
+        if self._stopped.is_set():
+            return
+        logger.info("governance worker started")
         if self._enable_scheduler and self._scheduler_task is None:
             self._scheduler_task = asyncio.create_task(self._scheduler_loop())
         while not self._stopped.is_set():
@@ -361,12 +385,13 @@ def _env_bool(name: str, default: bool) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
-async def _main() -> None:
+async def _main() -> int:
     worker = worker_from_env()
     loop = asyncio.get_running_loop()
     stop_event = asyncio.Event()
 
     def _request_stop() -> None:
+        logger.info("shutdown signal received")
         stop_event.set()
 
     import signal
@@ -377,14 +402,33 @@ async def _main() -> None:
         except NotImplementedError:
             signal.signal(sig, lambda *_: _request_stop())
 
-    worker.start()
-    await stop_event.wait()
-    await worker.stop()
+    run_task = worker.start()
+    stop_task = asyncio.create_task(stop_event.wait())
+    await asyncio.wait({run_task, stop_task}, return_when=asyncio.FIRST_COMPLETED)
+
+    exit_code = 0
+    if not stop_event.is_set():
+        stop_task.cancel()
+        error = None if run_task.cancelled() else run_task.exception()
+        logger.critical(
+            "governance worker loop exited without a shutdown signal; exiting so "
+            "the container restarts",
+            exc_info=error,
+        )
+        exit_code = 1
+
+    try:
+        await worker.stop()
+    except Exception:  # noqa: BLE001
+        if exit_code == 0:
+            logger.exception("governance worker stopped with an error")
+            exit_code = 1
+    return exit_code
 
 
 def main() -> None:
     configure_process_logging()
-    asyncio.run(_main())
+    sys.exit(asyncio.run(_main()))
 
 
 if __name__ == "__main__":
