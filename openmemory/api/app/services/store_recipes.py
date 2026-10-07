@@ -69,6 +69,26 @@ HOOK_PACKAGE_DESTINATIONS: dict[str, str] = {
     "claude": "~/.claude/hooks/{name}",
 }
 
+# Claude Code (and peers) install plugins under a marketplace cache and then
+# register/enable them via installed_plugins.json + settings.json.
+DEFAULT_PLUGIN_MARKETPLACE = "sharemem"
+PLUGIN_INSTALLED_JSON_VERSION = 2
+PLUGIN_CACHE_DESTINATIONS: dict[str, str] = {
+    "claude": "~/.claude/plugins/cache/{marketplace}/{name}/{version}",
+    "cursor": ".cursor/plugins/cache/{marketplace}/{name}/{version}",
+    "codex": "~/.codex/plugins/cache/{marketplace}/{name}/{version}",
+}
+PLUGIN_INSTALLED_PATHS: dict[str, str] = {
+    "claude": "~/.claude/plugins/installed_plugins.json",
+    "cursor": ".cursor/plugins/installed_plugins.json",
+    "codex": "~/.codex/plugins/installed_plugins.json",
+}
+PLUGIN_SETTINGS_PATHS: dict[str, str] = {
+    "claude": "~/.claude/settings.json",
+    "cursor": ".cursor/settings.json",
+    "codex": "~/.codex/settings.json",
+}
+
 _SAFE_SEGMENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 
@@ -153,8 +173,22 @@ class InstallRecipeService:
             steps = _mcp_steps(safe_target, safe_name, destination, spec, source)
         elif safe_kind == "hook":
             steps = _hook_steps(safe_target, safe_name, destination, spec, source)
+        elif safe_kind == "plugin":
+            steps = _plugin_steps(safe_target, safe_name, resource, spec, source)
         else:
             steps = _file_steps(safe_kind, safe_name, destination, source, spec)
+
+        if safe_kind == "hook":
+            rollback = _rollback_steps(
+                destination, _hook_package_destination(safe_target, safe_name)
+            )
+        elif safe_kind == "plugin":
+            rollback = _rollback_steps(
+                _plugin_installed_path(safe_target) or destination,
+                _plugin_cache_destination(safe_target, safe_name, resource, spec),
+            )
+        else:
+            rollback = _rollback_steps(destination)
 
         return {
             "version": RECIPE_VERSION,
@@ -178,10 +212,7 @@ class InstallRecipeService:
             },
             "source": source,
             "steps": steps,
-            "rollback": _rollback_steps(
-                destination,
-                _hook_package_destination(safe_target, safe_name) if safe_kind == "hook" else None,
-            ),
+            "rollback": rollback,
         }
 
 
@@ -260,16 +291,22 @@ def _resolve_source(kind: str, resource: dict[str, Any], spec: dict[str, Any]) -
     metadata = resource.get("metadata") if isinstance(resource.get("metadata"), dict) else {}
     annotations = metadata.get("annotations") if isinstance(metadata.get("annotations"), dict) else {}
 
-    # Skills published as complete packages are self-contained. Prefer the
-    # immutable AgentRegistry artifact even if an older metadata record still
-    # carries a Git repository for provenance.
-    if kind in ("skill", "hook"):
+    # Packaged skills/hooks/plugins are self-contained. Prefer the immutable
+    # AgentRegistry artifact even if an older metadata record still carries a
+    # Git repository for provenance.
+    if kind in ("skill", "hook", "plugin"):
         resolved_artifact = resolved.get("artifact")
         if isinstance(resolved_artifact, dict) and resolved_artifact.get("digest"):
-            default_media_type = (
-                SKILL_ARTIFACT_MEDIA_TYPE if kind == "skill" else HOOK_ARTIFACT_MEDIA_TYPE
-            )
-            collection = "skills" if kind == "skill" else "hooks"
+            default_media_type = {
+                "skill": SKILL_ARTIFACT_MEDIA_TYPE,
+                "hook": HOOK_ARTIFACT_MEDIA_TYPE,
+                "plugin": PLUGIN_ARTIFACT_MEDIA_TYPE,
+            }[kind]
+            collection = {
+                "skill": "skills",
+                "hook": "hooks",
+                "plugin": "plugins",
+            }[kind]
             return {
                 "type": "registry_artifact",
                 "media_type": resolved_artifact.get("mediaType") or default_media_type,
@@ -479,6 +516,150 @@ def _hook_steps(
             ],
         }
     )
+    return steps
+
+
+def _plugin_manifest(resource: dict[str, Any], spec: dict[str, Any]) -> dict[str, Any]:
+    status = resource.get("status") if isinstance(resource.get("status"), dict) else {}
+    for candidate in (spec.get("manifest"), status.get("manifest")):
+        if isinstance(candidate, dict):
+            return candidate
+    return {}
+
+
+def _plugin_marketplace(spec: dict[str, Any]) -> str:
+    marketplace = spec.get("marketplace")
+    if isinstance(marketplace, str) and marketplace.strip():
+        return marketplace.strip()
+    return DEFAULT_PLUGIN_MARKETPLACE
+
+
+def _plugin_version(resource: dict[str, Any], spec: dict[str, Any]) -> str:
+    manifest = _plugin_manifest(resource, spec)
+    for candidate in (spec.get("version"), manifest.get("version")):
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+    raise InstallRecipeValidationError("plugin sem version declarada")
+
+
+def _plugin_cache_destination(
+    target: str,
+    name: str,
+    resource: dict[str, Any],
+    spec: dict[str, Any],
+) -> Optional[str]:
+    template = PLUGIN_CACHE_DESTINATIONS.get(target)
+    if not template:
+        return None
+    return template.format(
+        marketplace=_plugin_marketplace(spec),
+        name=name,
+        version=_plugin_version(resource, spec),
+    )
+
+
+def _plugin_installed_path(target: str) -> Optional[str]:
+    return PLUGIN_INSTALLED_PATHS.get(target)
+
+
+def _plugin_settings_path(target: str) -> Optional[str]:
+    return PLUGIN_SETTINGS_PATHS.get(target)
+
+
+def _plugin_steps(
+    target: str,
+    name: str,
+    resource: dict[str, Any],
+    spec: dict[str, Any],
+    source: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Install a Claude-style plugin: cache files, register, enable, prompt config."""
+    marketplace = _plugin_marketplace(spec)
+    version = _plugin_version(resource, spec)
+    plugin_key = f"{name}@{marketplace}"
+    cache_destination = _plugin_cache_destination(target, name, resource, spec)
+    installed_path = _plugin_installed_path(target)
+    settings_path = _plugin_settings_path(target)
+    if not cache_destination or not installed_path or not settings_path:
+        raise InstallRecipeValidationError(f"o alvo {target} não suporta plugins")
+
+    steps: list[dict[str, Any]] = []
+    if source.get("type") == "registry_artifact":
+        steps.append(
+            {
+                "id": "download-and-extract-plugin",
+                "type": "download_and_extract",
+                "from": source,
+                "to": cache_destination,
+                "overwrite": True,
+                "idempotent": True,
+                "verify_artifact_sha256": source.get("artifact_digest"),
+            }
+        )
+    elif source.get("type") == "git":
+        steps.append(
+            {
+                "id": "copy-plugin-from-git",
+                "type": "copy",
+                "from": source,
+                "to": cache_destination,
+                "overwrite": True,
+                "idempotent": True,
+            }
+        )
+    else:
+        raise InstallRecipeValidationError(
+            "plugin precisa de artefato no registry ou fonte git"
+        )
+
+    steps.append(
+        {
+            "id": "register-installed-plugin",
+            "type": "merge_json",
+            "path": installed_path,
+            "strategy": "replace_key",
+            "key": f"plugins.{plugin_key}",
+            "content": {
+                "version": PLUGIN_INSTALLED_JSON_VERSION,
+                "plugins": {
+                    plugin_key: {
+                        "version": version,
+                        "installPath": cache_destination,
+                        "marketplace": marketplace,
+                    }
+                },
+            },
+            "idempotent": True,
+        }
+    )
+    steps.append(
+        {
+            "id": "enable-plugin",
+            "type": "merge_json",
+            "path": settings_path,
+            "strategy": "replace_key",
+            "key": f"enabledPlugins.{plugin_key}",
+            "content": {"enabledPlugins": {plugin_key: True}},
+            "idempotent": True,
+        }
+    )
+
+    manifest = _plugin_manifest(resource, spec)
+    user_config = manifest.get("userConfig")
+    if isinstance(user_config, dict):
+        for key, cfg in user_config.items():
+            if not isinstance(key, str) or not key.strip():
+                continue
+            config = cfg if isinstance(cfg, dict) else {}
+            steps.append(
+                {
+                    "id": f"prompt-user-config-{key.strip()}",
+                    "type": "prompt",
+                    "key": key.strip(),
+                    "sensitive": bool(config.get("sensitive")),
+                    "config": config,
+                }
+            )
     return steps
 
 
