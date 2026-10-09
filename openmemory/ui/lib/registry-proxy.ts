@@ -3,12 +3,15 @@ import { LEGACY_MCP_AUTH_HEADER } from "@/lib/mcp-install";
 
 const REGISTRY_CATALOG_RESOURCES = new Set([
   "agents",
+  "hooks",
   "mcpservers",
   "skills",
   "prompts",
   "plugins",
   "models",
 ]);
+const REGISTRY_PACKAGE_RESOURCES = new Set(["skills", "hooks", "plugins"]);
+const REGISTRY_PACKAGE_READ_ENDPOINTS = new Set(["artifact", "download", "files"]);
 
 function normalizeSegments(pathSegments: string[]): string[] {
   return pathSegments.map((segment) => segment.trim()).filter(Boolean);
@@ -79,7 +82,7 @@ export function isRegistryProxyPathAllowed(
     return (
       segments.length === 4 &&
       segments[0] === "v0" &&
-      segments[1] === "skills"
+      REGISTRY_PACKAGE_RESOURCES.has(segments[1])
     );
   }
 
@@ -102,7 +105,10 @@ function isNativeCatalogReadAllowed(pathSegments: string[]): boolean {
   if (pathSegments[0] !== "v0") return false;
   if (!REGISTRY_CATALOG_RESOURCES.has(pathSegments[1])) return false;
   if (pathSegments.length === 5) {
-    return pathSegments[1] === "skills" && pathSegments[4] === "download";
+    return (
+      REGISTRY_PACKAGE_RESOURCES.has(pathSegments[1]) &&
+      REGISTRY_PACKAGE_READ_ENDPOINTS.has(pathSegments[4])
+    );
   }
   return true;
 }

@@ -15,7 +15,7 @@ from typing import Any, Iterable, Optional
 from app.database import SessionLocal
 from app.models import Project, get_current_utc_time
 from app.read_audit_log_model import ReadAuditLog
-from sqlalchemy import func
+from sqlalchemy import false, func
 from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
@@ -211,47 +211,248 @@ def audit_log_display_label(
     return src or "Desconhecido"
 
 
+# --------------------------------------------------------------------------- #
+# Access-log display grouping
+#
+# Every UI open/reload and every MCP search writes one ``read_audit_logs`` row
+# (the table is an append-only audit trail and is NEVER pruned here). For the
+# per-memory "Log de Acesso" we collapse *consecutive* rows that share the same
+# actor (hostname + source + client) and access type inside a time window into
+# a single display entry carrying ``count`` and the first/last timestamps.
+#
+# The window is anchored on the newest row of each group (``newest - row <=
+# window``), so a group never spans more than the window even under periodic
+# polling. ``ACCESS_LOG_GROUP_WINDOW_SECONDS`` (default 300 = 5 min) tunes it;
+# ``0`` disables grouping. Grouping is computed over the memory's full history
+# (up to ``ACCESS_LOG_GROUP_SCAN_LIMIT`` newest rows) *before* pagination so
+# pages stay coherent: ``total`` counts display entries, ``raw_total`` rows.
+# --------------------------------------------------------------------------- #
+DEFAULT_ACCESS_LOG_GROUP_WINDOW_SECONDS = 300
+# Bounded scan: rows beyond this are not grouped (``grouping_truncated``).
+DEFAULT_ACCESS_LOG_GROUP_SCAN_LIMIT = 3000
+
+
+def _env_int(name: str, default: int, *, minimum: int = 0) -> int:
+    import os
+
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = int(raw.strip())
+    except ValueError:
+        return default
+    return max(minimum, value)
+
+
+def access_log_group_window_seconds() -> int:
+    return _env_int("ACCESS_LOG_GROUP_WINDOW_SECONDS", DEFAULT_ACCESS_LOG_GROUP_WINDOW_SECONDS)
+
+
+def access_log_group_scan_limit() -> int:
+    return _env_int("ACCESS_LOG_GROUP_SCAN_LIMIT", DEFAULT_ACCESS_LOG_GROUP_SCAN_LIMIT, minimum=1)
+
+
+# source → (channel, human label). ``api``/``admin`` are the Next.js UI.
+_CHANNELS: dict[str, tuple[str, str]] = {
+    "api": ("web", "Interface Web"),
+    "admin": ("web", "Interface Web (admin)"),
+    "mcp": ("mcp", "MCP"),
+    "compat_v3": ("api", "API (compat v3)"),
+}
+
+
+def access_channel(source: Optional[str], hostname: Optional[str] = None) -> tuple[str, str]:
+    """Return ``(channel, label)`` — ``web`` | ``mcp`` | ``api`` | ``other``."""
+    src = (source or "").strip().lower()
+    if src in _CHANNELS:
+        return _CHANNELS[src]
+    if (hostname or "").strip().startswith("ui:"):
+        return _CHANNELS["api"]
+    return "other", src or "Desconhecido"
+
+
+def _actor_group_key(row: Any) -> tuple:
+    return (
+        (row.hostname or "").strip(),
+        (row.source or "").strip().lower(),
+        (row.client_name or "").strip().lower(),
+        (row.access_type or "").strip().lower(),
+    )
+
+
+def group_read_audit_rows(rows: list[Any], window_seconds: int) -> list[list[Any]]:
+    """Collapse same-actor/same-type rows inside a window (input newest first).
+
+    A row joins the open group with the same key when it is within
+    ``window_seconds`` of that group's newest row. Rows of *other* keys in
+    between do not split the group — the UI fires ``list`` and ``get`` reads
+    interleaved on every page open, and strict adjacency would leave the
+    repetition visible. Output keeps newest-first order (by each group's
+    newest row). Deterministic and pure: no rows are dropped.
+    """
+    if window_seconds <= 0:
+        return [[row] for row in rows]
+    groups: list[list[Any]] = []
+    open_groups: dict[tuple, tuple[int, Optional[datetime]]] = {}
+    for row in rows:
+        key = _actor_group_key(row)
+        ts = as_utc(row.accessed_at)
+        current = open_groups.get(key)
+        if current is not None:
+            index, anchor = current
+            if anchor is not None and ts is not None and (anchor - ts).total_seconds() <= window_seconds:
+                groups[index].append(row)
+                continue
+        groups.append([row])
+        open_groups[key] = (len(groups) - 1, ts)
+    return groups
+
+
+def _group_to_log(group: list[Any]) -> dict:
+    newest = group[0]
+    oldest = group[-1]
+    channel, channel_label = access_channel(newest.source, newest.hostname)
+    return {
+        "id": str(newest.id),
+        "app_name": audit_log_display_name(
+            client_name=newest.client_name,
+            source=newest.source,
+        ),
+        "display_name": audit_log_display_label(
+            client_name=newest.client_name,
+            hostname=newest.hostname,
+            source=newest.source,
+        ),
+        "client_name": newest.client_name,
+        "accessed_at": utc_isoformat(newest.accessed_at),
+        "access_type": newest.access_type,
+        "source": newest.source,
+        "hostname": newest.hostname,
+        "query": newest.query,
+        # Additive fields (card 01ada614) — older clients ignore them.
+        "channel": channel,
+        "channel_label": channel_label,
+        "count": len(group),
+        "first_accessed_at": utc_isoformat(oldest.accessed_at),
+        "last_accessed_at": utc_isoformat(newest.accessed_at),
+    }
+
+
 def list_memory_read_audit(
     db: Session,
     memory_id: str,
     *,
     page: int = 1,
     page_size: int = 10,
+    grouped: bool = True,
+    window_seconds: Optional[int] = None,
 ) -> tuple[int, list[dict]]:
-    """Return paginated read-audit rows for a single memory (Qdrant/MCP path)."""
-    base = db.query(ReadAuditLog).filter(ReadAuditLog.memory_id == str(memory_id))
-    total = base.count()
+    """Return paginated read-audit entries for a single memory (Qdrant/MCP path).
+
+    With ``grouped`` (default) consecutive repeats are collapsed for display
+    (see module notes); ``total`` is then the number of display entries.
+    Returns ``(total, logs)``; use :func:`list_memory_read_audit_page` for the
+    extra metadata (``raw_total``, window, truncation).
+    """
+    result = list_memory_read_audit_page(
+        db,
+        memory_id,
+        page=page,
+        page_size=page_size,
+        grouped=grouped,
+        window_seconds=window_seconds,
+    )
+    return result["total"], result["logs"]
+
+
+def _channel_sources(channel: str) -> list[str]:
+    """Sources for a channel filter; ``agents`` = every non-UI channel (mcp + api)."""
+    wanted = {"mcp", "api"} if channel == "agents" else {channel}
+    return [src for src, (ch, _label) in _CHANNELS.items() if ch in wanted]
+
+
+def read_audit_channel_counts(db: Session, memory_id: str) -> dict[str, int]:
+    """Raw row counts per channel (``web``/``mcp``/``api``/``other``) for a memory."""
     rows = (
-        base.order_by(ReadAuditLog.accessed_at.desc())
-        .offset((page - 1) * page_size)
-        .limit(page_size)
+        db.query(ReadAuditLog.source, func.count(ReadAuditLog.id))
+        .filter(ReadAuditLog.memory_id == str(memory_id))
+        .group_by(ReadAuditLog.source)
         .all()
     )
-    logs = [
-        {
-            "id": str(row.id),
-            "app_name": audit_log_display_name(
-                client_name=row.client_name,
-                source=row.source,
-            ),
-            "display_name": audit_log_display_label(
-                client_name=row.client_name,
-                hostname=row.hostname,
-                source=row.source,
-            ),
-            "client_name": row.client_name,
-            "accessed_at": utc_isoformat(row.accessed_at),
-            "access_type": row.access_type,
-            "source": row.source,
-            "hostname": row.hostname,
-            "query": row.query,
-        }
-        for row in rows
-    ]
-    from app.utils.creator_identity import enrich_actor_items
+    counts: dict[str, int] = {"web": 0, "mcp": 0, "api": 0, "other": 0}
+    for source, count in rows:
+        channel, _ = access_channel(source)
+        counts[channel] = counts.get(channel, 0) + int(count or 0)
+    return counts
 
-    enrich_actor_items(logs)
-    return total, logs
+
+def list_memory_read_audit_page(
+    db: Session,
+    memory_id: str,
+    *,
+    page: int = 1,
+    page_size: int = 10,
+    grouped: bool = True,
+    window_seconds: Optional[int] = None,
+    channel: Optional[str] = None,
+) -> dict:
+    """Paginated (optionally grouped) access log for one memory.
+
+    ``channel`` (``web`` | ``mcp`` | ``api`` | ``agents``) restricts rows to one
+    access channel (``agents`` = MCP + compat API) — e.g. ``mcp`` hides the viewer's own Web UI reads, which otherwise
+    dominate the log of any memory people browse.
+    """
+    # Only the columns the log needs (no ORM entities): grouping scans up to
+    # ``ACCESS_LOG_GROUP_SCAN_LIMIT`` rows per request.
+    columns = (
+        ReadAuditLog.id,
+        ReadAuditLog.hostname,
+        ReadAuditLog.source,
+        ReadAuditLog.client_name,
+        ReadAuditLog.access_type,
+        ReadAuditLog.query,
+        ReadAuditLog.accessed_at,
+    )
+    conditions = [ReadAuditLog.memory_id == str(memory_id)]
+    if channel:
+        sources = _channel_sources(channel)
+        conditions.append(ReadAuditLog.source.in_(sources) if sources else false())
+    raw_total = db.query(func.count(ReadAuditLog.id)).filter(*conditions).scalar() or 0
+    base = db.query(*columns).filter(*conditions)
+    window = access_log_group_window_seconds() if window_seconds is None else max(0, window_seconds)
+    if not grouped:
+        window = 0
+    ordered = base.order_by(ReadAuditLog.accessed_at.desc(), ReadAuditLog.id.desc())
+    truncated = False
+
+    if window <= 0:
+        rows = ordered.offset((page - 1) * page_size).limit(page_size).all()
+        groups = [[row] for row in rows]
+        total = raw_total
+    else:
+        limit = access_log_group_scan_limit()
+        rows = ordered.limit(limit).all() if raw_total else []
+        truncated = raw_total > limit
+        all_groups = group_read_audit_rows(rows, window)
+        total = len(all_groups)
+        start = (page - 1) * page_size
+        groups = all_groups[start : start + page_size]
+
+    logs = [_group_to_log(group) for group in groups]
+    from app.utils.creator_identity import enrich_reader_items
+
+    enrich_reader_items(logs)
+    return {
+        "total": total,
+        "raw_total": raw_total,
+        "logs": logs,
+        "grouped": window > 0,
+        "group_window_seconds": window,
+        "grouping_truncated": truncated,
+        "channel": channel or None,
+        "channel_counts": read_audit_channel_counts(db, memory_id),
+    }
 
 
 def list_project_accessed_memories(
@@ -284,6 +485,15 @@ def list_project_accessed_memories(
     memories: list[dict] = []
     for memory_id, access_count, last_accessed in rows:
         shared = get_shared_memory_by_id(str(memory_id)) or {}
+        latest_access = (
+            db.query(ReadAuditLog)
+            .filter(ReadAuditLog.memory_id == str(memory_id))
+            .order_by(ReadAuditLog.accessed_at.desc())
+            .first()
+        )
+        latest_client = latest_access.client_name if latest_access else None
+        if latest_access and latest_access.source == "api" and latest_client == "openmemory":
+            latest_client = "Interface"
         memories.append(
             {
                 "memory": {
@@ -300,6 +510,7 @@ def list_project_accessed_memories(
                 },
                 "access_count": int(access_count or 0),
                 "last_accessed": as_utc(last_accessed),
+                "accessed_by_client": latest_client,
             }
         )
     return total, memories

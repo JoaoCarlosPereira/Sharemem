@@ -219,7 +219,7 @@ class TestSearchMemoryProjectScope:
         assert by_id["new"]["effective_score"] > by_id["old"]["effective_score"]
 
         factors = by_id["new"]["ranking_factors"]
-        assert set(factors) == {"recency", "project", "group"}
+        assert set(factors) == {"recency", "project", "group", "lexical"}
         # project="A" matches exactly → the documented exact-match boost.
         assert factors["project"] == pytest.approx(1.0 + recency.SEARCH_PROJECT_BOOST_EXACT)
         assert by_id["new"]["effective_score"] == pytest.approx(

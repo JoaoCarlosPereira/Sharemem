@@ -16,3 +16,6 @@ ui/package-lock.json
 ui/coverage/
 .pnpm-store/
 **/.pnpm-store/
+
+# Token admin gerado por run.sh (chmod 600)
+.openmemory-admin-token

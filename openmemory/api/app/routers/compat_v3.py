@@ -31,9 +31,10 @@ from app.utils.identity import resolve_hostname
 from app.utils.write_guard import check_write_allowed
 from app.utils.memory import get_memory_client
 from app.utils.partitioning import bind_active_collection
+from app.utils.project_name import normalize_project, normalize_project_with_notice
 from app.utils.read_audit import record_memory_reads
 from app.utils.read_cache import read_cache
-from app.utils.recency import rank_search_results
+from app.utils.recency import extract_task_codes, rank_search_results
 from fastapi import APIRouter, Request
 from pydantic import BaseModel
 
@@ -93,7 +94,8 @@ def _extract_scope(filters: Any) -> tuple[Optional[str], dict, bool, Optional[st
         if not isinstance(clause, dict):
             continue
         if clause.get("app_id"):
-            project = str(clause["app_id"])
+            # Mesma chave efetiva da escrita (whitespace interno -> '-').
+            project = normalize_project(str(clause["app_id"]))
         uid = clause.get("user_id")
         if uid == "*":
             is_global = True
@@ -167,7 +169,7 @@ def search(request: SearchRequest, http_request: Request) -> dict:
     elif requester_hostname is None:
         requester_hostname = request.user_id
     if project is None:
-        project = request.project
+        project = normalize_project(request.project)
     preferred_project = None if is_global else project
 
     # Grupo do solicitante: user_id nos filters (plugin) ou header legado → users.group_id.
@@ -182,7 +184,22 @@ def search(request: SearchRequest, http_request: Request) -> dict:
     top_k = max(1, min(requested_k or DEFAULT_TOP_K, MAX_TOP_K))
     # Over-fetch when we have to post-filter by metadata so the caller still
     # gets up to top_k matches after filtering.
-    fetch_k = min(MAX_TOP_K, top_k * 4) if metadata_filters else top_k
+    #
+    # Tambem quando a consulta traz um codigo de tarefa: ai existe uma chave
+    # exata para selecionar dentro do pool maior (lexical_match_factor), e a
+    # memoria certa costuma estar fora do top-5 bruto. Medido em 01/09/2026 na
+    # consulta "371145 aliquotas efetivas ... MR": 3/5 com fetch_k=5, 3/5 com
+    # fetch_k=40 sozinho, 5/5 com fetch_k=40 + boost lexical.
+    #
+    # Sem codigo na consulta o over-fetch NAO e feito: medido, ele sozinho e
+    # neutro ou levemente negativo (consulta "DDA Sicoob ...": 2/5 -> 1/5),
+    # porque so da a recencia mais candidatos recentes para promover.
+    if metadata_filters:
+        fetch_k = min(MAX_TOP_K, top_k * 4)
+    elif extract_task_codes(request.query):
+        fetch_k = min(MAX_TOP_K, max(top_k * 4, 40))
+    else:
+        fetch_k = top_k
 
     # Same Redis cache as app.mcp_server.search_memory: the hook prefetches reuse
     # one query per session, and re-embedding + re-querying Qdrant on every hook
@@ -271,7 +288,10 @@ def search(request: SearchRequest, http_request: Request) -> dict:
     # compatibility but no longer gates ordering; set MEM0_SEARCH_RECENCY_WEIGHT=0
     # for pure semantic order.
     rank_search_results(
-        results, preferred_project=preferred_project, requester_group=requester_group
+        results,
+        preferred_project=preferred_project,
+        requester_group=requester_group,
+        query=request.query,
     )
     results = results[:top_k]
 
@@ -332,8 +352,12 @@ async def add(request: AddRequest) -> dict:
     if not text:
         return {"status": "empty", "results": []}
 
-    project = request.app_id or "default"
+    # O SDK rejeita whitespace interno em ``project``; normaliza (caixa
+    # preservada) e devolve o projeto efetivo na resposta.
+    project, project_notice = normalize_project_with_notice(request.app_id or "default")
     metadata = dict(request.metadata or {})
+    if isinstance(metadata.get("project"), str):
+        metadata["project"] = normalize_project(metadata["project"])
     metadata.setdefault("project", project)
     metadata.setdefault("source_app", "openmemory")
     if request.user_id:
@@ -362,8 +386,11 @@ async def add(request: AddRequest) -> dict:
         return {"status": "error", "error": str(e), "results": []}
 
     results = result.get("results", []) if isinstance(result, dict) else []
-    return {"status": "ok", "event_id": (results[0].get("id") if results else None),
-            "results": results}
+    out = {"status": "ok", "event_id": (results[0].get("id") if results else None),
+           "results": results, "project": project}
+    if project_notice:
+        out["warning"] = project_notice
+    return out
 
 
 # --------------------------------------------------------------------------- #

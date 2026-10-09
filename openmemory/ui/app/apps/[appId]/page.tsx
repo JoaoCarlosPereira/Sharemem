@@ -161,6 +161,8 @@ export default function AppDetailsPage() {
           metadata={accessedMemory.memory.metadata_}
           categories={accessedMemory.memory.categories}
           access_count={accessedMemory.access_count}
+          accessed_by_client={accessedMemory.accessed_by_client}
+          attribution_prefix="Acessada por:"
           app_name={accessedMemory.memory.app_name}
           created_by_hostname={accessedMemory.memory.created_by_hostname}
           created_by_client={accessedMemory.memory.created_by_client}

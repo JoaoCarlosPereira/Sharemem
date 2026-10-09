@@ -53,16 +53,14 @@ from app.utils.partitioning import bind_active_collection
 from app.utils.permissions import check_memory_access_permissions
 from app.utils.read_cache import read_cache
 from app.utils.project_groups import projects_in_group
+from app.utils.project_name import normalize_project, normalize_project_with_notice
 from app.utils.recency import rank_search_results
+from app.utils.scope_keys import normalize_task, resolve_task
+from app.utils.spec_auth import resolve_spec_creator_email
 from app.utils.reranking import apply_rerank
 from app.utils.token_usage_wrapper import usage_attribution
 from app.utils.write_guard import check_write_allowed
-from app.utils.write_queue import (
-    WriteJob,
-    canonical_project_identifier,
-    estimate_write_wait_sec,
-    write_queue,
-)
+from app.utils.write_queue import WriteJob, estimate_write_wait_sec, write_queue
 from fastapi import FastAPI, Request
 from fastapi.routing import APIRouter
 from mcp.server.fastmcp import FastMCP
@@ -182,17 +180,17 @@ async def _run_blocking(operation, *, timeout: float = MCP_BLOCKING_TIMEOUT_SEC)
 # a direct tool call may not — fall back to an explicit sentinel for attribution.
 DEFAULT_CLIENT_NAME = "unknown-client"
 
-
 # Create a router for MCP endpoints
 mcp_router = APIRouter(prefix="/mcp")
 
 # Initialize SSE transport
 sse = SseServerTransport("/mcp/messages/")
 
-@mcp.tool(description="Save content for asynchronous memory extraction in a project. Call this whenever the user shares durable facts or preferences, or asks you to remember something. `project` is REQUIRED and scopes the memory (memories are shared across all machines on the local network). Optional `supersedes` is a list of memory IDs this write replaces — those are marked obsolete and hidden from search by default. Returns immediately with status accepted after enqueue (includes job_id, queue_depth, estimated_wait_sec); extraction runs in the background — the memory is not searchable until the worker finishes. Do NOT poll for job status. If the HTTP call returns 429 / rate_limit_exceeded, wait retry_after_sec (or Retry-After) and retry the same text 1–3 times with backoff; do not discard the content. To find conflicting memories, use search_memory / mark_obsolete — never on this write path.")
+@mcp.tool(description="Save content for asynchronous memory extraction in a project. Call this whenever the user shares durable facts or preferences, or asks you to remember something. `project` is REQUIRED and scopes the memory (memories are shared across all machines on the local network). Optional `task` is the Redmine task code (6 digits) this memory belongs to — it is a separate, exactly filterable key, so use it instead of putting the task number in `project` (`project` is the repository/product). Optional `supersedes` is a list of memory IDs this write replaces — those are marked obsolete and hidden from search by default; the reply also lists other active memories that say the same thing as what you superseded, so a duplicate does not survive the correction. Returns immediately with status accepted after enqueue (includes job_id, queue_depth, estimated_wait_sec); extraction runs in the background — the memory is not searchable until the worker finishes. Do NOT poll for job status. If the HTTP call returns 429 / rate_limit_exceeded, wait retry_after_sec (or Retry-After) and retry the same text 1–3 times with backoff; do not discard the content. To find conflicting memories, use search_memory / mark_obsolete — never on this write path.")
 async def add_memories(
     text: str,
     project: str,
+    task: str | None = None,
     supersedes: list[str] | None = None,
 ) -> str:
     # task_07 / ADR-004: fire-and-forget enqueue only. No embed/search/LLM on
@@ -229,9 +227,10 @@ async def add_memories(
         )
         return blocked
 
-    project = canonical_project_identifier(project)
-    if not project:
-        return "Error: project could not be converted into a valid identifier"
+    # Chave efetiva: o SDK rejeita whitespace interno no worker (job falhava em
+    # silencio depois do ack). Normaliza aqui e informa o projeto efetivo.
+    original_project = project.strip()
+    project, project_notice = normalize_project_with_notice(project)
     supersede_ids: list[str] = []
     if supersedes:
         for mid in supersedes:
@@ -241,7 +240,16 @@ async def add_memories(
             if s:
                 supersede_ids.append(s)
 
-    extras = {"supersedes": supersede_ids} if supersede_ids else None
+    # Chave de tarefa (opcional): a informada pelo chamador vence; senao tenta a
+    # forma explicita `TAREFA #NNNNNN` no proprio texto. Ver app.utils.scope_keys.
+    task_key = resolve_task(task, text)
+
+    extras: dict | None = {}
+    if supersede_ids:
+        extras["supersedes"] = supersede_ids
+    if task_key:
+        extras["task"] = task_key
+    extras = extras or None
 
     def _sync_enqueue():
         job_id_val = write_queue.enqueue(
@@ -296,8 +304,13 @@ async def add_memories(
         ),
         "project": project,
     }
+    if project_notice:
+        payload["project_requested"] = original_project
+        payload["warning"] = project_notice
     if supersede_ids:
         payload["supersedes"] = supersede_ids
+    if task_key:
+        payload["task"] = task_key
     return json.dumps(payload, indent=2)
 
 
@@ -469,13 +482,14 @@ async def _fetch_all_memories(memory_client, top_k: int = DEFAULT_LIST_TOP_K) ->
     return [_point_to_memory_result(p) for p in points]
 
 
-@mcp.tool(description="Search stored memories across all projects, ranked by relevance and recency. By default `project` is a soft hint (slight boost for matching names) — wrong or slightly different project names do not exclude results. Pass `strict_project=true` to hard-filter to that exact project name only. Obsolete (superseded) memories are hidden by default; pass `include_obsolete=true` for audit. Pass `rerank=true` only if you want cross-encoder reordering: it applies solely when MEM0_RERANKER_PROVIDER is set on the server; otherwise the response includes `rerank.applied=false` with reason `not_configured` (expected, not a bug). Memories are shared across all machines on the local network.")
+@mcp.tool(description="Search stored memories across all projects, ranked by relevance and recency. By default `project` is a soft hint (slight boost for matching names) — wrong or slightly different project names do not exclude results. Pass `strict_project=true` to hard-filter to that exact project name only. Pass `task` (6-digit Redmine code) to hard-filter to one task — that is the exact, reliable way to ask for everything about a task, and it works across projects. Even without it, a task code written in `query` gets an exact-match boost. Obsolete (superseded) memories are hidden by default; pass `include_obsolete=true` for audit. Pass `rerank=true` only if you want cross-encoder reordering: it applies solely when MEM0_RERANKER_PROVIDER is set on the server; otherwise the response includes `rerank.applied=false` with reason `not_configured` (expected, not a bug). Memories are shared across all machines on the local network.")
 async def search_memory(
     query: str,
     project: str,
     rerank: bool = False,
     strict_project: bool = False,
     include_obsolete: bool = False,
+    task: str | None = None,
 ) -> str:
     # NOTE (task_03 / ADR-003): semantic reads are GLOBAL across projects and SHARED
     # across all machines by default. ``project`` is a ranking hint only (small boost
@@ -483,6 +497,9 @@ async def search_memory(
     # by ``user_id`` (hostname is write-path attribution only).
     if not project:
         return "Error: project not provided"
+    # Mesma chave da escrita: "PONTEIRO DE SPEC" acha o gravado como
+    # "PONTEIRO-DE-SPEC" (filtro estrito, hint, cache e auditoria).
+    project = normalize_project(project)
 
     started = time.perf_counter()
     try:
@@ -496,7 +513,11 @@ async def search_memory(
             # strict_project narrows to the project's configured family when there is
             # one: asking to stay "in this project" means the subject, not the single
             # repository the session happens to be rooted at.
-            scope = projects_in_group(project) if strict_project else []
+            scope = (
+                [normalize_project(p) for p in projects_in_group(project)]
+                if strict_project
+                else []
+            )
             return req_group, mem_client, scope
 
         requester_group, memory_client, strict_scope = await _run_blocking(
@@ -513,11 +534,22 @@ async def search_memory(
             )
         else:
             search_filters = None
+
+        # ``task`` e filtro duro e ORTOGONAL ao projeto: a mesma tarefa vive em
+        # mais de um repositorio (a 371145 em sysmo-api-tributacao e sysmo-s1),
+        # entao restringir a tarefa nao pode implicar restringir o projeto.
+        task_key = normalize_task(task)
+        if task_key:
+            search_filters = dict(search_filters or {})
+            search_filters["task"] = task_key
         filter_hash = hashlib.sha256(
             json.dumps(
                 {
                     "mode": "strict" if strict_project else "global",
                     "preferred_project": project,
+                    # Parte da chave: o pool em cache e o pool FILTRADO, entao
+                    # uma busca com task nao pode ser servida da entrada sem ela.
+                    "task": task_key,
                     # Part of the key: the family is config-driven, so a change to
                     # MEM0_PROJECT_GROUPS must not be served from a stale entry.
                     "scope": strict_scope,
@@ -592,6 +624,7 @@ async def search_memory(
                             preferred_project=project,
                             requester_group=requester_group,
                             annotate=True,
+                            query=query,
                         )
                     )
                     return json.dumps(
@@ -634,20 +667,31 @@ async def search_memory(
                 )
             )
 
-        # Reranking (opt-in) refines relevance over the candidate pool before the
-        # boosts are applied, so recency/project/group still have the final say.
-        def _sync_rerank_and_rank():
-            r_status = None
-            if rerank:
-                r_status = apply_rerank(query, results)
-            # Rank the whole candidate pool, THEN cut the page: recency/project/group
-            # boosts must be able to promote a candidate that missed the raw top-K.
+        def _rank(items):
             rank_search_results(
-                results,
+                items,
                 preferred_project=project,
                 requester_group=requester_group,
                 annotate=True,
+                query=query,
             )
+
+        def _sync_rerank_and_rank():
+            # Rank the whole candidate pool, THEN cut the page: recency/project/group
+            # boosts must be able to promote a candidate that missed the raw top-K.
+            _rank(results)
+            if not rerank:
+                return None
+            # Reranking (opt-in) rescores only the best MEM0_RERANKER_TOP_N of that
+            # blend (bounded CPU cost), then the head is blended again with the
+            # normalized rerank score so recency/project/group keep the final say.
+            # On any failure/timeout ``results`` is untouched (original order).
+            r_status = apply_rerank(query, results, page_size=DEFAULT_SEARCH_TOP_K)
+            if r_status.get("applied"):
+                head_size = r_status["reranked"]
+                head = results[:head_size]
+                _rank(head)
+                results[:head_size] = head
             return r_status
 
         rerank_status = await _run_blocking(_sync_rerank_and_rank)
@@ -674,7 +718,7 @@ async def list_memories(
     if not project:
         return "Error: project not provided"
 
-    project = project.strip()
+    project = normalize_project(project.strip())
     try:
         limit = int(limit)
     except (TypeError, ValueError):
@@ -719,11 +763,13 @@ async def list_memories(
         return f"Error getting memories: {e}"
 
 
-@mcp.tool(description="Mark specific memories as obsolete (superseded) without deleting them. They disappear from search/list by default and remain recoverable via include_obsolete=true. Pass optional superseded_by with the correcting memory ID.")
+@mcp.tool(description="Mark specific memories as obsolete (superseded) without deleting them. They disappear from search/list by default and remain recoverable via include_obsolete=true. Pass optional superseded_by with the correcting memory ID. The reply carries `sibling_candidates`: OTHER memories still active that say the same thing as what you just obsoleted, plus `ingest_siblings`, the other facts extracted from the same original write. Neither is marked automatically — review them and call mark_obsolete again for the ones that must also go, or the wrong fact survives the correction in a second copy.")
 async def mark_obsolete(
     memory_ids: list[str],
     superseded_by: str | None = None,
+    suggest_siblings: bool = True,
 ) -> str:
+    from app.utils.supersede_fanout import find_sibling_candidates, ingest_siblings
     from app.utils.supersedes import mark_points_obsolete
 
     if not memory_ids:
@@ -740,6 +786,26 @@ async def mark_obsolete(
         return "Error: memory_ids not provided"
 
     try:
+        # Os irmaos sao lidos ANTES de marcar: depois de obsoleto o ponto ainda
+        # existe, mas o filtro de estado passaria a exclui-lo dos vizinhos e a
+        # busca partiria de um texto que ja nao esta em circulacao.
+        candidates: list = []
+        siblings: list = []
+        if suggest_siblings:
+            try:
+                candidates = await anyio.to_thread.run_sync(
+                    lambda: find_sibling_candidates(
+                        memory_client,
+                        ids,
+                        exclude_ids=[superseded_by] if superseded_by else [],
+                    )
+                )
+                siblings = await anyio.to_thread.run_sync(
+                    lambda: ingest_siblings(memory_client, ids)
+                )
+            except Exception:  # noqa: BLE001 - sugerir nao pode impedir corrigir
+                logging.exception("sibling lookup failed; proceeding with mark_obsolete")
+
         out = await anyio.to_thread.run_sync(
             lambda: mark_points_obsolete(
                 memory_client,
@@ -749,14 +815,21 @@ async def mark_obsolete(
         )
         # Best-effort cache bust for common projects of updated points is hard
         # without payloads; callers should re-search.
-        return json.dumps(
-            {
-                "status": "ok",
-                "updated": out.get("updated") or [],
-                "missing": out.get("missing") or [],
-            },
-            indent=2,
-        )
+        payload = {
+            "status": "ok",
+            "updated": out.get("updated") or [],
+            "missing": out.get("missing") or [],
+        }
+        if suggest_siblings:
+            payload["sibling_candidates"] = candidates
+            payload["ingest_siblings"] = siblings
+            if candidates or siblings:
+                payload["note"] = (
+                    "Estas memorias continuam ATIVAS e dizem o mesmo que a que "
+                    "voce acabou de superar. Nenhuma foi marcada. Revise e chame "
+                    "mark_obsolete de novo para as que tambem devem sair."
+                )
+        return json.dumps(payload, indent=2)
     except Exception as e:
         logging.exception("mark_obsolete failed")
         return f"Error marking obsolete: {e}"
@@ -1001,7 +1074,8 @@ async def create_spec_workspace(project_id: str, slug: str, name: str) -> str:
                 group_id = u.group_id if u else None
                 ws, created = get_or_create_workspace(
                     db, project_id=project_id, slug=slug, name=name,
-                    created_by=hostname, group_id=group_id
+                    created_by=hostname, group_id=group_id,
+                    created_by_email=resolve_spec_creator_email(db),
                 )
                 out = WorkspaceResponse.model_validate(ws).model_dump(mode="json")
                 out["created"] = created
@@ -1265,7 +1339,7 @@ def _current_mcp_actor_id() -> str:
     return hostname or "mcp"
 
 
-@mcp.tool(description="Search the internal ShareMem catalog across skills, MCP servers, prompts, agents and plugins via AgentRegistry. Safe read-only operation. `query` may be empty to list recent resources; `kind` optionally narrows to skill|mcpserver|prompt|agent|plugin. Returns JSON results with summaries and raw resources.")
+@mcp.tool(description="Search the internal ShareMem catalog across skills, hooks, MCP servers, prompts, agents and plugins via AgentRegistry. Safe read-only operation. `query` may be empty to list recent resources; `kind` optionally narrows to skill|hook|mcpserver|prompt|agent|plugin. Returns JSON results with summaries and raw resources.")
 async def search_catalog(
     query: str = "",
     kind: str | None = None,
@@ -1424,6 +1498,100 @@ async def publish_skill_package(
         return f"Error: {e}"
 
 
+@mcp.tool(description="Publica um Hook completo na Store. Informe nome, descrição em PT-BR, o mapa de eventos (ex.: {\"PreToolUse\": [{\"matcher\": \"Bash\", \"hooks\": [{\"type\": \"command\", \"command\": \"python ${HOOK_DIR}/guard.py\"}]}]}) e todos os arquivos da pasta, incluindo HOOK.md. Use ${HOOK_DIR} nos comandos para apontar para arquivos do próprio pacote. Exige pedido explícito e confirm_user_requested=true.")
+async def publish_hook_package(
+    name: str,
+    description: str,
+    events: dict[str, Any],
+    files: list[dict[str, Any]],
+    tag: str = "latest",
+    title: str | None = None,
+    language: str = "pt-BR",
+    confirm_user_requested: bool = False,
+) -> str:
+    try:
+        from app.services.hook_packages import (
+            HookPackageInput,
+            build_hook_archive,
+            validate_command_references,
+        )
+        from app.utils.agentregistry import AgentRegistryError
+
+        if not confirm_user_requested:
+            return "Error: publish_hook_package exige pedido explícito do desenvolvedor (confirm_user_requested=true)"
+        payload = HookPackageInput(
+            name=name,
+            tag=tag,
+            title=title,
+            description=description,
+            language=language,
+            events=events,
+            files=files,
+        )
+        validate_command_references(payload)
+        archive, inventory = build_hook_archive(payload)
+        client = get_agent_registry_client()
+        resource = {
+            "apiVersion": "ar.dev/v1alpha1",
+            "kind": "Hook",
+            "metadata": {"name": name, "tag": tag},
+            "spec": {
+                "title": title or name,
+                "description": description,
+                "language": language,
+                "events": payload.to_registry_events(),
+            },
+        }
+        auth_headers = _registry_auth_headers_for_mcp()
+        apply_result = await client.apply_resource(resource=resource, auth_headers=auth_headers)
+        artifact_result = await client.put_package_artifact(
+            kind="hook", name=name, tag=tag, archive=archive, auth_headers=auth_headers
+        )
+        return json.dumps(
+            {
+                "resource": resource,
+                "apply": apply_result,
+                "artifact": {
+                    "sha256": hashlib.sha256(archive).hexdigest(),
+                    "size": len(archive),
+                    "files": inventory,
+                    "transport": artifact_result,
+                },
+            },
+            default=str,
+        )
+    except (ValueError, AgentRegistryError) as e:
+        return f"Error: {getattr(e, 'detail', str(e))}"
+    except Exception as e:  # noqa: BLE001
+        logging.exception(e)
+        return f"Error: {e}"
+
+
+@mcp.tool(description="Exclui um Hook completo da Store por nome e tag. Operação irreversível no catálogo e exige pedido explícito com confirm_user_requested=true.")
+async def delete_hook_package(
+    name: str,
+    tag: str = "latest",
+    confirm_user_requested: bool = False,
+) -> str:
+    try:
+        from app.utils.agentregistry import AgentRegistryError
+
+        if not confirm_user_requested:
+            return "Error: delete_hook_package exige pedido explícito do desenvolvedor (confirm_user_requested=true)"
+        result = await get_agent_registry_client().delete_resource(
+            kind="hook",
+            name=name,
+            tag=tag,
+            auth_headers=_registry_auth_headers_for_mcp(),
+        )
+        return json.dumps({"deleted": True, "name": name, "tag": tag, "result": result})
+    except AgentRegistryError as e:
+        return f"Error: {e.detail}"
+    except Exception as e:  # noqa: BLE001
+        logging.exception(e)
+        return f"Error: {e}"
+
+
 @mcp.tool(description="Exclui uma Skill completa da Store por nome e tag. Operação irreversível no catálogo e exige pedido explícito com confirm_user_requested=true.")
 async def delete_skill_package(
     name: str,
@@ -1515,7 +1683,7 @@ async def create_task(
         return f"Error: {e}"
 
 
-@mcp.tool(description="Claim a task so you become its assignee and it moves to 'em_andamento'. On success the JSON includes kanban={column,label,means,do_now,next_column,next_action,pipeline,pipeline_rule} — you MUST follow do_now before advancing. IDEMPOTENT FOR YOU: if you are already the assignee, calling this again re-claims the card from ANY column and renews the lease — that is how you send a card back from revisao_codigo/fase_teste to em_andamento when a check failed, and how you renew a claim before it expires. It only fails by exclusivity when the card is active with a DIFFERENT assignee (claimed=false) — do NOT retry blindly. LEASE: a claim expires after a window of inactivity (SPEC_TASK_TIMEOUT_HOURS, default 24h) and the card returns to the backlog; the response carries claim_expires_at, and any action on the card (status change, edit, re-claim) renews it. Pipeline: em_andamento → revisao_codigo → fase_teste → concluido (never skip).")
+@mcp.tool(description="Claim a task so you become its assignee and it moves to 'em_andamento'. On success the JSON includes kanban={column,label,means,do_now,next_column,next_action,pipeline,pipeline_rule} — you MUST follow do_now before advancing. IDEMPOTENT FOR YOU: if you are already the assignee, calling this again re-claims the card from ANY column and renews the lease — that is how you send a card back from revisao_codigo/fase_teste to em_andamento when a check failed, and how you renew a claim before it expires. UNASSIGNED CARD OUTSIDE BACKLOG (e.g. created in PLANKA directly in revisao_codigo): claim assigns you and KEEPS the current column (status in the response). It only fails by exclusivity when the card is active with a DIFFERENT assignee (claimed=false) — do NOT retry blindly. LEASE: a claim expires after a window of inactivity (SPEC_TASK_TIMEOUT_HOURS, default 24h) and the card returns to the backlog; the response carries claim_expires_at, and any action on the card (status change, edit, re-claim) renews it. Pipeline: em_andamento → revisao_codigo → fase_teste → concluido (never skip).")
 async def claim_task(task_id: str) -> str:
     try:
         def _sync_op():
@@ -1539,21 +1707,36 @@ async def claim_task(task_id: str) -> str:
                     return f"Error: {he.detail}"
                 result = _claim_task(db, tid, claimant)
                 if result.claimed:
+                    # Adoção de card sem dono fora do backlog mantém a coluna.
+                    status_after = result.status or "em_andamento"
                     return json.dumps(
                         enrich_status_payload(
                             {
                                 "claimed": True,
-                                "assignee": claimant,
+                                "assignee": result.current_assignee or claimant,
                                 "version": result.version,
-                                "status": "em_andamento",
+                                "status": status_after,
                                 # Prazo do lease: passado este ponto sem atividade, o
                                 # card volta ao backlog sozinho.
                                 "claim_expires_at": result.expires_at,
                             },
-                            "em_andamento",
+                            status_after,
                             db=db,
                         ),
                         default=str,
+                    )
+                if result.archived:
+                    return json.dumps(
+                        {
+                            "claimed": False,
+                            "archived": True,
+                            "current_assignee": result.current_assignee,
+                            "version": result.version,
+                            "message": (
+                                "Card arquivado — está fora do fluxo. Para retomá-lo, "
+                                "chame unarchive_task(task_id, expected_version) antes."
+                            ),
+                        }
                     )
                 return json.dumps(
                     {
@@ -1583,6 +1766,7 @@ async def release_task(task_id: str) -> str:
             from app.models import TaskCard
             from app.routers.specs import _assert_access
             from app.utils.kanban_pipeline import enrich_status_payload
+            from app.utils.task_lock import TaskStatusPolicyError
             from app.utils.task_lock import release_task as _release_task
         
             actor = resolve_hostname(user_id_var.get(None))
@@ -1596,7 +1780,12 @@ async def release_task(task_id: str) -> str:
                     _assert_access(db, task.workspace_id)
                 except HTTPException as he:
                     return f"Error: {he.detail}"
-                result = _release_task(db, tid, actor, reason="release via MCP")
+                try:
+                    result = _release_task(db, tid, actor, reason="release via MCP")
+                except TaskStatusPolicyError as exc:
+                    return json.dumps(
+                        {"policy": True, "code": exc.code, "message": exc.message}
+                    )
                 return json.dumps(
                     enrich_status_payload(
                         {"released": True, "version": result.version, "status": "tasks"},
@@ -1800,11 +1989,12 @@ async def get_task(task_id: str) -> str:
         return f"Error: {e}"
 
 
-@mcp.tool(description="List the task cards of a spec workspace, optionally filtered by Kanban column (tasks/em_andamento/revisao_codigo/fase_teste/concluido). This is how you go from a workspace to a claimable task_id without copying it from the web UI. Each item carries `version`, which update_task_status requires as expected_version — no extra read needed. Pass include_description=true to also get each card's body. Returns a JSON list; empty when there are none (never an error).")
+@mcp.tool(description="List the task cards of a spec workspace, optionally filtered by Kanban column (tasks/em_andamento/revisao_codigo/fase_teste/concluido). This is how you go from a workspace to a claimable task_id without copying it from the web UI. Each item carries `version`, which update_task_status requires as expected_version — no extra read needed. Pass include_description=true to also get each card's body. Archived cards (see archive_task) are hidden by default; pass include_archived=true to list them too (they carry archived_at). Returns a JSON list; empty when there are none (never an error).")
 async def list_tasks(
     workspace_id: str,
     status: str | None = None,
     include_description: bool = False,
+    include_archived: bool = False,
 ) -> str:
     try:
         def _sync_op():
@@ -1829,7 +2019,10 @@ async def list_tasks(
                         )
                 try:
                     tasks = _list_tasks_endpoint(
-                        uuid.UUID(workspace_id), status=status_enum, db=db
+                        uuid.UUID(workspace_id),
+                        status=status_enum,
+                        include_archived=include_archived,
+                        db=db,
                     )
                 except HTTPException as he:
                     return f"Error: {he.detail}"
@@ -1971,6 +2164,78 @@ async def delete_task(task_id: str) -> str:
     except Exception as e:  # noqa: BLE001
         logging.exception(e)
         return f"Error: {e}"
+
+
+async def _set_task_archived(
+    task_id: str, expected_version: int, *, archive: bool, reason: str | None = None
+) -> str:
+    try:
+        def _sync_op():
+            from fastapi import HTTPException
+
+            from app.models import TaskCard
+            from app.routers.specs import _assert_access
+            from app.utils.task_lock import TaskStatusPolicyError
+            from app.utils.task_lock import archive_task as _archive
+            from app.utils.task_lock import unarchive_task as _unarchive
+
+            actor = resolve_hostname(user_id_var.get(None))
+            db = SessionLocal()
+            try:
+                tid = uuid.UUID(task_id)
+                task = db.query(TaskCard).filter(TaskCard.id == tid).first()
+                if task is None:
+                    return f"Error: task {task_id} não encontrada"
+                try:
+                    _assert_access(db, task.workspace_id)
+                except HTTPException as he:
+                    return f"Error: {he.detail}"
+                try:
+                    if archive:
+                        result = _archive(db, tid, expected_version, actor, reason=reason)
+                    else:
+                        result = _unarchive(db, tid, expected_version, actor)
+                except TaskStatusPolicyError as exc:
+                    return json.dumps(
+                        {"policy": True, "code": exc.code, "message": exc.message}
+                    )
+                if result.conflict:
+                    return json.dumps(
+                        {
+                            "conflict": True,
+                            "expected_version": expected_version,
+                            "current_version": result.version,
+                            "archived_at": result.archived_at,
+                        },
+                        default=str,
+                    )
+                return json.dumps(
+                    {
+                        "archived": archive,
+                        "task_id": task_id,
+                        "version": result.version,
+                        "status": task.status.value,
+                        "archived_at": result.archived_at,
+                        "archived_by": result.archived_by,
+                    },
+                    default=str,
+                )
+            finally:
+                db.close()
+        return await _run_blocking(_sync_op)
+    except Exception as e:  # noqa: BLE001
+        logging.exception(e)
+        return f"Error: {e}"
+
+
+@mcp.tool(description="Archive a task card WITHOUT deleting anything — the non-destructive alternative to delete_task. Use it for a card that was worked on and then cancelled or became obsolete: it disappears from list_tasks and the board by default, but keeps its column, assignee, status history and comments (list_tasks(include_archived=true) shows it again, with archived_at). Prefer delete_task only for a card created by mistake. An archived card cannot be claimed or moved until unarchive_task. Pass expected_version; on a version conflict this returns {conflict: true, current_version} and changes NOTHING. A card active with ANOTHER assignee is refused (policy not_assignee). Optional reason is recorded in the audit log.")
+async def archive_task(task_id: str, expected_version: int, reason: str | None = None) -> str:
+    return await _set_task_archived(task_id, expected_version, archive=True, reason=reason)
+
+
+@mcp.tool(description="Undo archive_task: the card reappears in list_tasks and on the board in the same column it was in, with history and comments intact. Pass expected_version; on a version conflict this returns {conflict: true, current_version} and changes NOTHING.")
+async def unarchive_task(task_id: str, expected_version: int) -> str:
+    return await _set_task_archived(task_id, expected_version, archive=False)
 
 
 def _warn_invalid_mcp_hostname(raw_uid: str | None) -> None:

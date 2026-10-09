@@ -73,6 +73,7 @@
  */
 
 const { idInput } = require('../../../utils/inputs');
+const { hasAdminAccessToSharedProject } = require('../../../utils/mem0-group-scope');
 
 const Errors = {
   NOT_ENOUGH_RIGHTS: {
@@ -155,7 +156,7 @@ module.exports = {
 
       ({ card: linkedCard } = path);
 
-      if (currentUser.role !== User.Roles.ADMIN || path.project.ownerProjectManagerId) {
+      if (!hasAdminAccessToSharedProject(this.req, path.project)) {
         const isProjectManager = await sails.helpers.users.isProjectManager(
           currentUser.id,
           path.project.id,

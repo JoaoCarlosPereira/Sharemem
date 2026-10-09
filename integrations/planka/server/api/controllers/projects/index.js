@@ -95,6 +95,23 @@
 const filterBoardsByGroup = require('../../../utils/filter-boards-by-group');
 const getBoardGroupIds = require('../../../utils/get-board-group-ids');
 const getGroupVisibilityUserIds = require('../../../utils/get-group-visibility-user-ids');
+const filterProjectsByVisibleBoards = require('../../../utils/filter-projects-by-visible-boards');
+const { getMappedProjectIds } = require('../../../utils/mem0-shared-access');
+const { hasAdminAccessToSharedProject } = require('../../../utils/mem0-group-scope');
+
+const EMPTY_RESPONSE = () => ({
+  items: [],
+  included: {
+    projectManagers: [],
+    baseCustomFieldGroups: [],
+    boards: [],
+    boardMemberships: [],
+    customFields: [],
+    notificationServices: [],
+    users: [],
+    backgroundImages: [],
+  },
+});
 
 module.exports = {
   async fn() {
@@ -110,11 +127,9 @@ module.exports = {
           this.req.mem0Auth && this.req.mem0Auth.group,
         );
       } catch (error) {
+        // Fail-closed: sem grupo resolvido, nenhum projeto.
         sails.log.warn('projects/index: failed to resolve current user group:', error.message);
-        groupVisibilityUserIds = {
-          restrictUnknownCreators: true,
-          sameGroupUserIds: [],
-        };
+        return EMPTY_RESPONSE();
       }
     }
 
@@ -123,10 +138,10 @@ module.exports = {
     let sharedProjects;
     let sharedProjectIds;
 
-    const managerProjectIds = await sails.helpers.users.getManagerProjectIds(currentUser.id);
+    let managerProjectIds = await sails.helpers.users.getManagerProjectIds(currentUser.id);
     const fullyVisibleProjectIds = [...managerProjectIds];
 
-    if (currentUser.role === User.Roles.ADMIN) {
+    if (hasAdminAccessToSharedProject(this.req, null)) {
       sharedProjects = await Project.qm.getShared({
         exceptIdOrIds: managerProjectIds,
       });
@@ -148,8 +163,8 @@ module.exports = {
       true,
     );
 
-    const projectIds = [...managerProjectIds, ...membershipProjectIds];
-    const projects = await Project.qm.getByIds(projectIds);
+    let projectIds = [...managerProjectIds, ...membershipProjectIds];
+    let projects = await Project.qm.getByIds(projectIds);
 
     if (sharedProjectIds) {
       projectIds.push(...sharedProjectIds);
@@ -157,7 +172,8 @@ module.exports = {
     }
 
     const fullyVisibleBoards = await Board.qm.getByProjectIds(fullyVisibleProjectIds);
-    let boards = [...fullyVisibleBoards, ...membershipBoards];
+    const allBoards = [...fullyVisibleBoards, ...membershipBoards];
+    let boards = allBoards;
 
     if (groupVisibilityUserIds) {
       try {
@@ -187,12 +203,47 @@ module.exports = {
       visibleBoardIds.has(String(boardId)),
     );
 
+    let projectManagers = await ProjectManager.qm.getByProjectIds(projectIds);
+
+    if (groupVisibilityUserIds) {
+      // Mem0 Shared: sem bypass de ADMIN — projeto sem board visível some
+      // (inclusive nome), e o restante do payload acompanha o recorte.
+      let mappedProjectIds = new Set();
+      try {
+        mappedProjectIds = await getMappedProjectIds(
+          (sql, values) => sails.sendNativeQuery(sql, values),
+          projectIds,
+        );
+      } catch (error) {
+        sails.log.warn('projects/index: failed to resolve mirrored projects:', error.message);
+        // Fail-closed: tratar todos como espelhados (só aparecem com board visível).
+        mappedProjectIds = new Set(projectIds.map(String));
+      }
+
+      const visibleProjects = filterProjectsByVisibleBoards(projects, {
+        allBoards,
+        visibleBoards: boards,
+        currentUserId: currentUser.id,
+        managerProjectIds,
+        projectManagers,
+        sameGroupUserIds: groupVisibilityUserIds.sameGroupUserIds,
+        groupedUserIds: groupVisibilityUserIds.groupedUserIds,
+        mappedProjectIds,
+      });
+      const visibleProjectIds = new Set(visibleProjects.map(({ id }) => String(id)));
+
+      projects = visibleProjects;
+      projectIds = projectIds.filter((id) => visibleProjectIds.has(String(id)));
+      managerProjectIds = managerProjectIds.filter((id) => visibleProjectIds.has(String(id)));
+      projectManagers = projectManagers.filter(({ projectId }) =>
+        visibleProjectIds.has(String(projectId)),
+      );
+    }
+
     const projectFavorites = await ProjectFavorite.qm.getByProjectIdsAndUserId(
       projectIds,
       currentUser.id,
     );
-
-    const projectManagers = await ProjectManager.qm.getByProjectIds(projectIds);
 
     const userIds = sails.helpers.utils.mapRecords(projectManagers, 'userId', true);
     const users = await User.qm.getByIds(userIds);

@@ -7,6 +7,14 @@ import logging
 import re
 import uuid
 
+LOG_FORMAT = "%(asctime)s %(levelname)s:%(name)s:%(message)s"
+LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S%z"
+
+
+def configure_process_logging(level: int = logging.INFO) -> None:
+    logging.basicConfig(level=level, format=LOG_FORMAT, datefmt=LOG_DATE_FORMAT)
+
+
 request_id_var: contextvars.ContextVar[str] = contextvars.ContextVar(
     "request_id", default=""
 )

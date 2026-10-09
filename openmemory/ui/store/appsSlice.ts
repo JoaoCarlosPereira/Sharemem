@@ -23,6 +23,7 @@ export interface AppMemory {
 export interface AccessedMemory {
   memory: AppMemory;
   access_count: number;
+  accessed_by_client?: string | null;
 }
 
 export interface AppDetails {

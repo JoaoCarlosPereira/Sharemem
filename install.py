@@ -47,7 +47,8 @@ Atualização (preserva memórias):
 
   O --update faz: git pull (ou --no-pull explícito) → rebuild de API/UI → migrations
   aditivas (produção) → recria os containers de app no lugar → rebuild/healthcheck
-  dos sidecars (agentregistry/planka, profile ``sidecars``). NUNCA remove volumes, então
+  dos sidecars (agentregistry/planka, profile ``sidecars``) → confere se a Store
+  responde em todas as coleções (skills, hooks). NUNCA remove volumes, então
   Qdrant + SQLite/PostgreSQL e os segredos do .env permanecem intactos.
   Não para Qdrant/Postgres/Redis no meio do rebuild (se o build falhar, dados
   continuam no ar). Preenche defaults vazios de S3/MinIO e PLANKA no .env
@@ -750,7 +751,47 @@ def wait_for_agentregistry(dc, timeout=120, interval=2):
     return False
 
 
-def ensure_sidecars_after_update(dc, timeout=120):
+def wait_for_store_kinds(
+    dc, kinds=("skills", "hooks"), timeout=60, interval=2, access_token="local"
+):
+    """Confere se o Agent Registry já serve cada coleção da Store.
+
+    O ``/v0/ping`` responde antes de o binário novo estar completo: uma imagem
+    antiga ainda sobe e passa no ping, mas devolve 404 na coleção de um kind
+    recém-adicionado (``hooks``). Checar as coleções transforma uma Store
+    quebrada — que só apareceria ao publicar — em um aviso na atualização.
+    """
+    pending = list(kinds)
+    deadline = time.time() + timeout
+    while pending and time.time() < deadline:
+        still_missing = []
+        for kind in pending:
+            probe = dc(
+                "exec", "-T", "agentregistry", "wget", "-qO-",
+                "--header", f"Authorization: Bearer {access_token}",
+                f"http://127.0.0.1:8080/v0/{kind}?namespace=default&limit=1",
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            if probe.returncode != 0:
+                still_missing.append(kind)
+        pending = still_missing
+        if pending:
+            time.sleep(min(interval, max(0, deadline - time.time())))
+    if pending:
+        warn(
+            "A Store não respondeu nestas coleções: " + ", ".join(pending) + ".\n"
+            "    Costuma ser imagem antiga do agentregistry ou migração do Registry "
+            "pendente. Reconstrua o sidecar:\n"
+            "    COMPOSE_PROFILES=sidecars docker compose -f docker-compose.scale.yml "
+            "up -d --no-deps --build agentregistry"
+        )
+        return False
+    ok("Store servindo todas as coleções (" + ", ".join(kinds) + ").")
+    return True
+
+
+def ensure_sidecars_after_update(dc, timeout=120, access_token="local"):
     """Sobe Store (agentregistry) + Kanban (planka) com profile ``sidecars``.
 
     O ``compose up`` sem profile para containers de serviços com profile
@@ -775,6 +816,12 @@ def ensure_sidecars_after_update(dc, timeout=120):
             "O container agentregistry iniciou, mas a API ainda não está saudável. "
             "Verifique os logs antes de usar a Store."
         )
+        return False
+    # O ping só diz que o processo subiu. As coleções dizem que o binário
+    # novo está mesmo no ar, incluindo os kinds adicionados nesta versão.
+    if not wait_for_store_kinds(
+        dc, timeout=min(timeout, 60), access_token=access_token
+    ):
         return False
     ok("Sidecars agentregistry + planka no ar; Agent Registry saudável.")
     return True
@@ -1479,6 +1526,18 @@ def run_update(args):
         dc("logs", "--tail", "60", "postgres", "pgbouncer")
         die("PgBouncer não ficou pronto a tempo.")
     ok("PgBouncer pronto.")
+    log("Verificando os drivers PostgreSQL da imagem da API")
+    driver_check = dc(
+        "run", "--rm", "--no-deps", "openmemory-mcp",
+        "python", "-c", "import psycopg, psycopg2",
+    )
+    if driver_check.returncode != 0:
+        die(
+            "A imagem da API não contém os drivers PostgreSQL necessários "
+            "(psycopg e psycopg2). Nenhuma migration foi executada. "
+            "Confira openmemory/api/requirements.txt e reconstrua a imagem."
+        )
+    ok("Drivers psycopg e psycopg2 disponíveis na imagem.")
     log("Aplicando migrations novas (alembic upgrade head) — aditivo, preserva os dados")
     if dc("run", "--rm", "--no-deps", "openmemory-mcp",
           "alembic", "upgrade", "head").returncode != 0:
@@ -1496,7 +1555,11 @@ def run_update(args):
     if dc("up", "-d", "--no-deps", "--force-recreate", *app_services).returncode != 0:
         die("Falha ao recriar os serviços de aplicação.")
     # Sidecars Store/Kanban: build+up explícito (imagens locais).
-    if not ensure_sidecars_after_update(dc, timeout=min(args.timeout, 120)):
+    if not ensure_sidecars_after_update(
+        dc,
+        timeout=min(args.timeout, 120),
+        access_token=read_env(compose_env, "INTERNAL_ACCESS_TOKEN") or "local",
+    ):
         die("Agent Registry não ficou saudável após a atualização. "
             "Os dados persistentes foram preservados; verifique os logs do sidecar.")
     port = int(args.proxy_port)

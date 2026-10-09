@@ -252,6 +252,110 @@ def segment_preserved(
     return preserved >= threshold
 
 
+_BS = chr(92)  # barra invertida, para nao poluir os literais abaixo
+
+# --------------------------------------------------------------------------- #
+# Reparo de dano de escape (caminhos Windows/UNC)
+# --------------------------------------------------------------------------- #
+# O extrator e um LLM e devolve as memorias dentro de uma string JSON. Quando o
+# texto de origem traz um caminho Windows, o modelo emite as barras invertidas
+# sem duplicar e a desserializacao as consome como sequencias de escape. Medido
+# na memoria a62a97a9-66e6-4ddc-b7bc-e471c168d12d (28/08/2026): o caminho de
+# rede da equipe foi gravado com TAB no lugar de "\T", U+0131 no lugar de "\E"
+# e NUL no lugar de "\0" - caminho UNC inutilizavel.
+#
+# Caracteres de controle C0 nunca sao legitimos numa frase extraida, entao
+# servem de assinatura do dano. Quando o texto de origem ainda tem o caminho
+# integro, reenxertamos o caminho verbatim; o que sobrar de controle vira uma
+# barra invertida entre caracteres colados (a origem quase certa) ou e removido.
+
+# TAB incluso de proposito: e o produto mais comum do dano. Quebra de linha e
+# retorno de carro ficam de fora - sao separadores legitimos.
+_CONTROL_CHARS = re.compile(r"[\x00-\x09\x0b\x0c\x0e-\x1f]")
+
+# Caminho UNC (dupla barra + host + share) ou com letra de unidade (C:).
+# Segmentos intermediarios aceitam espaco - os shares da equipe se chamam
+# "Equipe Financeiro Fiscal" - porque sao delimitados pela barra seguinte. O
+# segmento final nao aceita, senao o caminho engoliria o resto da frase.
+_PATH_SEG = r"[^\s\\/:*?\"<>|]+"
+_PATH_SEG_SP = _PATH_SEG + r"(?:[ ]" + _PATH_SEG + r")*"
+_WINDOWS_PATH = re.compile(
+    r"(?:[A-Za-z]:\\|\\{1,2})"
+    + r"(?:" + _PATH_SEG_SP + r"\\)+"
+    + _PATH_SEG
+)
+
+
+def has_escape_damage(text: str) -> bool:
+    """True quando o texto carrega caracteres de controle de escape mal desfeito."""
+    return bool(text) and bool(_CONTROL_CHARS.search(text))
+
+
+def extract_windows_paths(text: str) -> list[str]:
+    """Caminhos Windows/UNC presentes no texto, do mais longo para o mais curto."""
+    if not text:
+        return []
+    found = {m.group(0).rstrip(".,;:") for m in _WINDOWS_PATH.finditer(text)}
+    return sorted(found, key=len, reverse=True)
+
+
+def _damaged_span(text: str, path: str):
+    """Localiza no texto danificado o trecho que corresponde a ``path``."""
+    segments = [seg for seg in path.replace("/", _BS).split(_BS) if seg]
+    if not segments:
+        return None
+    head, tail = segments[0], segments[-1]
+    i = text.find(head)
+    if i < 0:
+        return None
+    start = i
+    while start > 0 and text[start - 1] == _BS:
+        start -= 1
+    j = text.find(tail, i + len(head))
+    if j >= 0:
+        end = j + len(tail)
+    else:
+        # Cauda perdida no dano: para no primeiro delimitador de frase.
+        m = re.search(r"[,;\n]", text[i:])
+        end = i + m.start() if m else len(text)
+    if not _CONTROL_CHARS.search(text[start:end]):
+        return None
+    return start, end
+
+
+def _collapse_leftover_controls(text: str) -> str:
+    """Controle sobrevivente vira barra invertida entre caracteres colados."""
+
+    def _sub(m):
+        pos = m.start()
+        before = text[pos - 1] if pos else ""
+        after = text[pos + 1] if pos + 1 < len(text) else ""
+        if before and after and not before.isspace() and not after.isspace():
+            return _BS
+        return ""
+
+    return _CONTROL_CHARS.sub(_sub, text)
+
+
+def repair_escape_damage(text: str, source_text: str = "") -> str:
+    """Reconstroi caminhos destruidos por desescape indevido durante a extracao.
+
+    Sem dano, devolve o texto intocado - o caminho normal nao paga nada.
+    """
+    if not has_escape_damage(text):
+        return text
+    repaired = text
+    for path in extract_windows_paths(source_text or ""):
+        span = _damaged_span(repaired, path)
+        if span is None:
+            continue
+        start, end = span
+        repaired = repaired[:start] + path + repaired[end:]
+        if not has_escape_damage(repaired):
+            break
+    return _collapse_leftover_controls(repaired)
+
+
 def format_memory_with_raw(interpreted: str, raw_content: str) -> str:
     """Combine interpreted summary with verbatim technical content."""
     interpreted = (interpreted or "").strip()
@@ -313,6 +417,17 @@ def enrich_extracted_memories(
     source — those segments become standalone technical_artifact memories.
     """
     memories = list(extracted_memories or [])
+
+    # Reparo de escape antes de qualquer analise: um caminho UNC destruido pela
+    # desserializacao da resposta do LLM nao pode ser gravado nem casado com os
+    # segmentos tecnicos da origem. Roda sempre, inclusive quando a origem nao e
+    # "tecnica" pelos padroes acima - o dano independe disso.
+    for mem in memories:
+        for field in ("text", "raw_content"):
+            value = mem.get(field)
+            if isinstance(value, str) and has_escape_damage(value):
+                mem[field] = repair_escape_damage(value, source_text)
+
     if not source_text or not has_technical_content(source_text):
         return memories
 

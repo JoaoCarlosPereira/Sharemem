@@ -10,8 +10,6 @@ Persistence is SQLite-backed through the existing SQLAlchemy stack
 (``app.database``), so enqueued jobs survive process restarts.
 """
 
-import re
-import unicodedata
 import uuid
 from datetime import timedelta
 from dataclasses import dataclass
@@ -22,14 +20,6 @@ from app.utils.datetime_format import format_utc_iso
 from app.models import WriteQueueJob as WriteQueueModel
 from app.models import WriteQueueStatus
 from sqlalchemy.orm import Session
-
-
-def canonical_project_identifier(project: str) -> str:
-    """Convert a display project name into the identifier accepted by mem0."""
-    value = project.strip()
-    normalized = unicodedata.normalize("NFKD", value)
-    ascii_value = normalized.encode("ascii", "ignore").decode("ascii").lower()
-    return re.sub(r"[^a-z0-9]+", "-", ascii_value).strip("-")
 
 
 @dataclass
@@ -83,7 +73,7 @@ class WriteQueue:
         try:
             row = WriteQueueModel(
                 id=uuid.UUID(job.id) if job.id else uuid.uuid4(),
-                project=canonical_project_identifier(job.project),
+                project=job.project,
                 hostname=job.hostname,
                 client_name=job.client_name,
                 text=job.text,

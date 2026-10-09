@@ -229,6 +229,10 @@ async def test_mcp_search_records_a_read_audit_row(db_factory):
         mcp_server.user_id_var.set("S0258")
         mcp_server.client_name_var.set("claude-code")
         await tool.fn("counter strike", project="mem0-shared")
+        # The audit write runs off the event loop (never delays the MCP reply).
+        from app.utils.mcp_read_wrappers import drain_pending_read_audits
+
+        await drain_pending_read_audits()
 
     db = db_factory()
     try:

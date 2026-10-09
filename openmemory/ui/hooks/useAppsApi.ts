@@ -54,13 +54,21 @@ interface FetchAppsParams {
   page_size?: number;
 }
 
+/**
+ * ``POST /api/v1/apps/{id}/rename``: 200 aplica o rename; 202 ``proposal_pending``
+ * quando o destino já existe (vira proposta de unificação em Governança).
+ */
+export type RenameProjectResult =
+  | { status: "success"; new_name?: string; moved_memories?: number; message?: string }
+  | { status: "proposal_pending"; new_name: string; message?: string; proposal?: { id: string } | null };
+
 interface UseAppsApiReturn {
   fetchApps: (params?: FetchAppsParams) => Promise<{ apps: App[], total: number }>;
   fetchAppDetails: (appId: string) => Promise<void>;
   fetchAppMemories: (appId: string, page?: number, pageSize?: number) => Promise<void>;
   fetchAppAccessedMemories: (appId: string, page?: number, pageSize?: number) => Promise<void>;
   updateAppDetails: (appId: string, details: { is_active: boolean }) => Promise<void>;
-  renameApp: (appId: string, newName: string) => Promise<{ moved_memories: number; new_name: string }>;
+  renameApp: (appId: string, newName: string) => Promise<RenameProjectResult>;
   deleteApp: (appId: string, confirmName: string) => Promise<{ deleted_memories: number; project: string }>;
   isLoading: boolean;
   error: string | null;
@@ -203,10 +211,7 @@ export const useAppsApi = (): UseAppsApiReturn => {
   const renameApp = async (appId: string, newName: string) => {
     setIsLoading(true);
     try {
-      const response = await axios.post<{
-        moved_memories: number;
-        new_name: string;
-      }>(`${getApiUrl()}/api/v1/apps/${appId}/rename`, {
+      const response = await axios.post<RenameProjectResult>(`${getApiUrl()}/api/v1/apps/${appId}/rename`, {
         new_name: newName,
       });
       return response.data;

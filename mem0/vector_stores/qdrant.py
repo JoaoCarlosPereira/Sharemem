@@ -205,7 +205,19 @@ class Qdrant(VectorStoreBase):
     TENANT_FIELD = "project"
     # Keyword payload indexes (exact-match filters). `type`/`hash` added for Fase 2
     # (plugin filters and dedup) alongside the pre-existing identity fields.
-    KEYWORD_INDEX_FIELDS = ["user_id", "agent_id", "run_id", "actor_id", "type", "hash", "state"]
+    # `task` (codigo da tarefa) e `ingest_id` (procedencia: fatos extraidos do
+    # mesmo texto) sao filtros exatos - ver app.utils.scope_keys.
+    KEYWORD_INDEX_FIELDS = [
+        "user_id",
+        "agent_id",
+        "run_id",
+        "actor_id",
+        "type",
+        "hash",
+        "state",
+        "task",
+        "ingest_id",
+    ]
     # Datetime payload indexes (range filters for TTL/pruning, ADR-002).
     DATETIME_INDEX_FIELDS = ["created_at"]
 

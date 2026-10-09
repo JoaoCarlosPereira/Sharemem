@@ -76,7 +76,12 @@ async def resync_workspace(
     except PlankaMirrorError as exc:
         result.errors.append(f"set_project_lifecycle: {exc.detail}")
 
-    tasks = db.query(TaskCard).filter(TaskCard.workspace_id == workspace_id).all()
+    # Arquivados não têm card no PLANKA (ver mirror_archive_task_best_effort).
+    tasks = (
+        db.query(TaskCard)
+        .filter(TaskCard.workspace_id == workspace_id, TaskCard.archived_at.is_(None))
+        .all()
+    )
     result.spec_tasks = len(tasks)
     for task in tasks:
         try:

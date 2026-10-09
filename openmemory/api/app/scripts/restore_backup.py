@@ -25,6 +25,7 @@ from app.utils.backup_archive import (
     SchemaIncompatibleError,
 )
 from app.utils.backup_policy import get_backup_policy_runtime
+from app.utils.logging_context import configure_process_logging
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +48,7 @@ def run_restore(
 
 
 def main(argv=None, *, build: Optional[Callable[[], BackupArchive]] = None) -> int:
-    logging.basicConfig(level=logging.INFO)
+    configure_process_logging()
     parser = argparse.ArgumentParser(description="Restore de backup na instalação.")
     parser.add_argument("archive", help="caminho do arquivo .zip de backup")
     args = parser.parse_args(argv)

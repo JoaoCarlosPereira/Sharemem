@@ -8,11 +8,14 @@ Qdrant and only calls the PLANKA REST API.
 
 from __future__ import annotations
 
+import logging
 import os
+import re
 from typing import Any, Optional, Protocol
 from uuid import UUID
 
 import httpx
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models import (
@@ -24,8 +27,39 @@ from app.models import (
     parse_document_type,
 )
 
+logger = logging.getLogger(__name__)
+
 DEFAULT_PLANKA_BASE_URL = "http://planka:1337"
 DEFAULT_PLANKA_TIMEOUT_SECONDS = 5.0
+
+# IDs PLANKA são snowflakes numéricos (bigint como string). Validar antes de
+# interpolar em path evita path traversal/rota arbitrária a partir de webhook.
+# ASCII explícito + fullmatch: ``\d`` aceitaria dígitos Unicode e ``$`` um "\n" final.
+_PLANKA_ID_RE = re.compile(r"[0-9]{1,32}")
+
+
+def is_planka_id(value: Any) -> bool:
+    """``True`` se ``value`` é um ID PLANKA válido (1–32 dígitos ASCII)."""
+    return value is not None and _PLANKA_ID_RE.fullmatch(str(value)) is not None
+
+
+def _mapped_planka_id(row: Optional["SpecPlankaIdMap"]) -> Optional[str]:
+    """ID de uma linha do mapa, ou ``None`` (com warning) se não for ID PLANKA válido.
+
+    Linha corrompida no ``spec_planka_id_map`` não pode virar path (ex.: ``../users/me``);
+    o espelho pula a operação sem chamar o PLANKA em vez de quebrar o fluxo Spec.
+    """
+    if row is None:
+        return None
+    if is_planka_id(row.planka_id):
+        return row.planka_id
+    logger.warning(
+        "planka_mirror_invalid_mapped_id entity=%s spec_id=%s planka_id=%r — operação ignorada",
+        row.entity_type,
+        row.spec_id,
+        row.planka_id,
+    )
+    return None
 
 # Gap-based list positions (PLANKA convention).
 _LIST_POSITION_STEP = 65536
@@ -165,9 +199,11 @@ class PlankaMirrorHttpClient:
         if not task:
             raise PlankaMirrorNotFound(f"TaskCard {task_id} não encontrada")
 
+        existing = self._get_map(ENTITY_TASK, task_id)
+        if existing is not None and _mapped_planka_id(existing) is None:
+            return
         board_id = await self.ensure_workspace_board(task.workspace_id)
         list_id = await self._list_id_for_status(task.workspace_id, board_id, task.status.value)
-        existing = self._get_map(ENTITY_TASK, task_id)
         position = float(task.position) if task.position is not None else float(_LIST_POSITION_STEP)
         body: dict[str, Any] = {
             "name": _truncate(task.title, 1024),
@@ -192,11 +228,29 @@ class PlankaMirrorHttpClient:
                 f"/api/lists/{list_id}/cards",
                 json=body,
             )
-            self._upsert_map(ENTITY_TASK, task_id, _item_id(created))
-        task_map = self._get_map(ENTITY_TASK, task_id)
-        if task_map:
-            await self._mirror_task_checklists(task_id, task_map.planka_id)
-            await self._mirror_task_assignee(task, task_map.planka_id)
+            created_id = _item_id(created)
+            # Commit imediato do vínculo para um evento humano não importar o card
+            # como task nova. Corrida com import concorrente: a UniqueConstraint
+            # barra o duplicado → rollback + PlankaMirrorError(409), nunca 500.
+            try:
+                self._upsert_map(ENTITY_TASK, task_id, created_id)
+                self.db.commit()
+            except IntegrityError as exc:
+                self.db.rollback()
+                logger.error(
+                    "planka_mirror_link_conflict task=%s planka_card=%s "
+                    "detail=card já vinculado a outra task (import concorrente)",
+                    task_id,
+                    created_id,
+                )
+                raise PlankaMirrorError(
+                    409,
+                    f"card PLANKA {created_id} já vinculado a outra task (import concorrente)",
+                ) from exc
+        card_id = _mapped_planka_id(self._get_map(ENTITY_TASK, task_id))
+        if card_id:
+            await self._mirror_task_checklists(task_id, card_id)
+            await self._mirror_task_assignee(task, card_id)
         self.db.commit()
 
     async def mirror_task_status(self, task_id: UUID) -> None:
@@ -204,13 +258,15 @@ class PlankaMirrorHttpClient:
         if not task:
             raise PlankaMirrorNotFound(f"TaskCard {task_id} não encontrada")
 
-        board_id = await self.ensure_workspace_board(task.workspace_id)
-        list_id = await self._list_id_for_status(task.workspace_id, board_id, task.status.value)
         existing = self._get_map(ENTITY_TASK, task_id)
         if not existing:
             # Card still missing — full mirror creates it in the right list.
             await self.mirror_task(task_id)
             return
+        if _mapped_planka_id(existing) is None:
+            return
+        board_id = await self.ensure_workspace_board(task.workspace_id)
+        list_id = await self._list_id_for_status(task.workspace_id, board_id, task.status.value)
 
         await self._request(
             "PATCH",
@@ -241,6 +297,8 @@ class PlankaMirrorHttpClient:
 
         if not task_map:
             raise PlankaMirrorError(502, "PLANKA card não mapeado para o task")
+        if _mapped_planka_id(task_map) is None:
+            return
 
         from app.utils.creator_identity import (
             identity_for_actor,
@@ -316,7 +374,7 @@ class PlankaMirrorHttpClient:
 
     async def delete_task(self, task_id: UUID) -> None:
         existing = self._get_map(ENTITY_TASK, task_id)
-        if not existing:
+        if not existing or _mapped_planka_id(existing) is None:
             return
         try:
             await self._request("DELETE", f"/api/cards/{existing.planka_id}")
@@ -350,7 +408,17 @@ class PlankaMirrorHttpClient:
             )
         except PlankaMirrorError as exc:
             if exc.status_code == 404:
-                # Projeto foi removido diretamente no PLANKA; mapa órfão, não retenta.
+                # Projeto removido no PLANKA (mapa órfão) OU o ator DEFAULT_ADMIN
+                # não é gerente do projeto (projects/update.js devolve 404). Não
+                # retenta nem levanta, mas registra para não divergir em silêncio.
+                logger.warning(
+                    "PLANKA project lifecycle PATCH returned 404 for project %s "
+                    "(workspace %s); project may have been deleted, or "
+                    "DEFAULT_ADMIN_EMAIL may not be a project_manager of it — see "
+                    "runbooks/kanban-group-visibility.md",
+                    project_map.planka_id,
+                    workspace_id,
+                )
                 return
             raise
 
@@ -360,6 +428,9 @@ class PlankaMirrorHttpClient:
         PUT ``/api/cards/:id/mem0-assignee`` faz upsert do user por e-mail, garante
         board membership e deixa exatamente um membro (ou nenhum no release).
         """
+        if not is_planka_id(planka_card_id):
+            logger.warning("planka_mirror_invalid_card_id card=%r — assignee ignorado", planka_card_id)
+            return
         from app.utils.creator_identity import (
             identity_for_actor,
             resolve_actor_identities_with_db,
@@ -588,6 +659,9 @@ def _item_id(payload: dict[str, Any]) -> str:
     item = payload.get("item") if isinstance(payload, dict) else None
     if not isinstance(item, dict) or item.get("id") is None:
         raise PlankaMirrorError(502, "PLANKA retornou item sem id")
+    # Nunca grava no mapa (nem usa em path) um ID que não seja snowflake numérico.
+    if not is_planka_id(item["id"]):
+        raise PlankaMirrorError(502, f"PLANKA retornou ID inválido: {item['id']!r}")
     return str(item["id"])
 
 

@@ -1,0 +1,13 @@
+# Dependencias OPCIONAIS do rerank local (card 80110071). NAO entram na imagem
+# padrao: so sao instaladas com o build arg INSTALL_RERANK=1 (ver api/Dockerfile e
+# docs/runbooks/rerank.md). Sem elas, MEM0_RERANKER_PROVIDER=sentence_transformer
+# responde rerank.applied=false reason="unavailable: ..." e a busca segue normal.
+#
+# Torch CPU-only fica em requirements-rerank-torch.txt e e instalado ANTES deste
+# arquivo, num passo separado com --index-url https://download.pytorch.org/whl/cpu
+# (sem o PyPI no mesmo resolve, entao nunca o wheel CUDA). Aqui o torch ja instalado
+# satisfaz a dependencia do sentence-transformers e o pip nao o troca.
+# Fora do Docker: pip install -r requirements-rerank-torch.txt && pip install -r requirements-rerank.txt
+#
+# Mesmo piso do extra "extras" do pyproject raiz (mem0/reranker/sentence_transformer_reranker.py).
+sentence-transformers>=5.0.0,<6

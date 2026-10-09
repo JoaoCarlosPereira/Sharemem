@@ -38,8 +38,10 @@ from app.utils.metrics import (
     WRITE_WORKER_ERRORS,
     WRITE_WORKER_SUCCESS,
 )
+from app.utils.project_name import normalize_project
 from app.utils.projects import upsert_project as _default_upsert_project
 from app.utils.read_cache import read_cache
+from app.utils.scope_keys import resolve_task
 from app.utils.token_usage_wrapper import usage_attribution
 from app.utils.write_queue import WriteJob
 from app.utils.write_queue import write_queue as _default_write_queue
@@ -97,6 +99,9 @@ DEFAULT_HEARTBEAT_INTERVAL_SEC = 15.0
 
 # How often the side recovery/heartbeat loop runs (independent of process_once).
 DEFAULT_SIDE_LOOP_INTERVAL_SEC = 15.0
+
+STARTUP_RETRY_INITIAL_SEC = 1.0
+STARTUP_RETRY_MAX_SEC = 30.0
 
 
 
@@ -292,6 +297,20 @@ class WriteWorker:
 
     async def _process_job_body(self, job: WriteJob) -> None:
         """Inner job work (timeout-wrapped by :meth:`_process_job`)."""
+        # Defensivo: jobs enfileirados antes da normalizacao na entrada podem
+        # trazer ``project`` com espaco interno, que o SDK rejeita (ValueError)
+        # e faria o job falhar apos todas as tentativas. Normaliza a chave em
+        # memoria (a linha da fila nao e reescrita) para que add, catalogo,
+        # invalidacao de cache e atribuicao usem a mesma chave efetiva.
+        effective_project = normalize_project(job.project)
+        if effective_project and effective_project != job.project:
+            logger.info(
+                "write job project normalized job_id=%s project=%r -> %r",
+                job.id,
+                job.project,
+                effective_project,
+            )
+            job.project = effective_project
         client = self._client_provider()
         if client is None:
             raise RuntimeError("memory client unavailable (LLM/backend down)")
@@ -371,6 +390,16 @@ class WriteWorker:
         supersedes = extras.get("supersedes") or []
         if isinstance(supersedes, list) and supersedes:
             metadata["supersedes"] = [str(x) for x in supersedes if x]
+
+        # Procedencia (app.utils.scope_keys): a extracao e fan-out, um texto vira
+        # N fatos atomicos com ids independentes. O id do job ja e unico por
+        # submissao, entao serve de agrupador - superar a decisao passa a poder
+        # alcancar todos os fatos que nasceram dela.
+        if job.id:
+            metadata["ingest_id"] = str(job.id)
+        task_key = resolve_task(extras.get("task"), job.text)
+        if task_key:
+            metadata["task"] = task_key
         kwargs = dict(
             user_id=job.hostname,
             project=job.project,
@@ -455,6 +484,19 @@ class WriteWorker:
         try:
             from app.utils.supersedes import mark_points_obsolete
 
+            # Vizinhos ativos ANTES de marcar: depois o filtro de estado os
+            # esconderia. Sao so registrados - marcar em silencio uma memoria
+            # que o chamador nao citou seria decidir por ele.
+            candidates = []
+            try:
+                from app.utils.supersede_fanout import find_sibling_candidates
+
+                candidates = find_sibling_candidates(
+                    client, supersedes, exclude_ids=new_ids
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception("sibling lookup failed job_id=%s", job.id)
+
             out = mark_points_obsolete(
                 client, supersedes, superseded_by=superseded_by
             )
@@ -465,6 +507,17 @@ class WriteWorker:
                 out.get("updated"),
                 out.get("missing"),
             )
+            for c in candidates:
+                logger.warning(
+                    "supersede sibling STILL ACTIVE job_id=%s superseded=%s "
+                    "candidate=%s score=%.4f project=%s text=%r",
+                    job.id,
+                    c["superseded_id"],
+                    c["candidate_id"],
+                    c["score"],
+                    c.get("project"),
+                    (c.get("candidate_text") or "")[:160],
+                )
         except Exception:  # noqa: BLE001
             logger.exception(
                 "supersedes apply failed job_id=%s project=%s", job.id, job.project
@@ -525,9 +578,7 @@ class WriteWorker:
 
     async def run(self) -> None:
         """Run the consume loop until :meth:`stop` is requested."""
-        recovered = self._queue.recover_stale_processing()
-        if recovered:
-            logger.info("recovered %s stale processing jobs -> queued", recovered)
+        await self._startup_recovery()
         self._recover_failed_jobs()
         self._log_llm_startup_status()
         logger.info(
@@ -564,6 +615,28 @@ class WriteWorker:
                 except asyncio.TimeoutError:
                     pass
         logger.info("write worker stopped")
+
+    async def _startup_recovery(self) -> None:
+        delay = STARTUP_RETRY_INITIAL_SEC
+        while not self._stopped.is_set():
+            try:
+                recovered = self._queue.recover_stale_processing()
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "startup recovery failed (database unreachable?); "
+                    "retrying in %.0fs",
+                    delay,
+                    exc_info=True,
+                )
+                try:
+                    await asyncio.wait_for(self._stopped.wait(), timeout=delay)
+                except asyncio.TimeoutError:
+                    pass
+                delay = min(delay * 2, STARTUP_RETRY_MAX_SEC)
+                continue
+            if recovered:
+                logger.info("recovered %s stale processing jobs -> queued", recovered)
+            return
 
     async def _side_loop(self) -> None:
         """Heartbeat + fail stuck processing even while a job is in flight."""

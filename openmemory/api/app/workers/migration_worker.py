@@ -20,6 +20,7 @@ from qdrant_client.models import PointStruct
 
 from app.database import SessionLocal
 from app.models import MigrationState, MigrationStatus
+from app.utils.logging_context import configure_process_logging
 from app.utils.metrics import MIGRATION_POINTS_COPIED
 
 logger = logging.getLogger(__name__)
@@ -159,7 +160,7 @@ def migration_worker_from_env() -> MigrationWorker:
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO)
+    configure_process_logging()
     migration_worker_from_env().run_copy()
 
 

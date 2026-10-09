@@ -172,7 +172,13 @@ def test_existing_memories_keep_state_after_upgrade(tmp_path, monkeypatch):
     db.close()
     eng.dispose()
 
-    command.downgrade(cfg, "-1")
+    # "-1" é ambíguo quando o head é uma merge revision (vários pais): desce um
+    # passo explicitamente até o primeiro pai do head.
+    from alembic.script import ScriptDirectory
+
+    script = ScriptDirectory.from_config(cfg)
+    down = script.get_revision(script.get_current_head()).down_revision
+    command.downgrade(cfg, down[0] if isinstance(down, tuple) else down)
     command.upgrade(cfg, "head")
 
     eng = create_engine(url)

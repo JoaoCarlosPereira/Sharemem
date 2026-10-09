@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 
 import {
   applyLegacyAdminToken,
+  buildUpstreamTarget,
   rewriteUpstreamRedirectLocation,
   sanitizeUpstreamHeaders,
 } from "@/lib/proxy-headers";
@@ -17,12 +18,21 @@ async function proxyRequest(
   req: NextRequest,
   pathSegments: string[],
 ): Promise<NextResponse> {
-  const suffix = pathSegments.length ? `/${pathSegments.join("/")}` : "";
-  const target = `${internalBase()}${suffix}${req.nextUrl.search}`;
+  // Segmentos chegam decodificados pelo Next: valida e normaliza ANTES de
+  // decidir qualquer injeção de credencial (anti path traversal ``..%2f``).
+  const upstreamTarget = buildUpstreamTarget(
+    internalBase(),
+    pathSegments ?? [],
+    req.nextUrl.search,
+  );
+  if (!upstreamTarget) {
+    return NextResponse.json({ detail: "caminho inválido" }, { status: 400 });
+  }
+  const target = upstreamTarget.url;
 
   const headers = applyLegacyAdminToken(sanitizeUpstreamHeaders(req.headers), {
     method: req.method,
-    pathSegments,
+    pathSegments: upstreamTarget.pathSegments,
   });
 
   const hasBody = req.method !== "GET" && req.method !== "HEAD";

@@ -69,19 +69,6 @@ def _job(text="hello world", project="proj-a", hostname="host-1",
 # ---------------------------------------------------------------------------
 
 class TestEnqueue:
-    def test_enqueue_canonicalizes_project_name(self, queue, db_path):
-        job_id = queue.enqueue(_job(project="Herdeiro do Arcanjo"))
-
-        _, factory = _make_factory(db_path)
-        db = factory()
-        try:
-            row = db.query(WriteQueueModel).filter(
-                WriteQueueModel.id == uuid.UUID(job_id)
-            ).first()
-            assert row.project == "herdeiro-do-arcanjo"
-        finally:
-            db.close()
-
     def test_enqueue_creates_queued_and_returns_job_id(self, queue, db_path):
         job_id = queue.enqueue(_job())
 

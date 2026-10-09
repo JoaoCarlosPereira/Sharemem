@@ -3,6 +3,8 @@
  * Licensed under the Fair Use License: https://github.com/plankanban/planka/blob/master/LICENSE.md
  */
 
+const { isMem0BridgeActive } = require('../../../utils/mem0-group-scope');
+
 class Scoper {
   constructor(project, board, { notificationService }) {
     this.project = project;
@@ -97,7 +99,9 @@ class Scoper {
     if (!this.userIdsWithFullProjectVisibility) {
       const projectManagerUserIds = await this.getProjectManagerUserIds();
 
-      if (this.project.ownerProjectManagerId) {
+      // Mem0 Shared: todo usuário do embed é ADMIN; ADMIN não pode receber
+      // eventos de projeto de outro grupo — só gerentes e board members.
+      if (this.project.ownerProjectManagerId || isMem0BridgeActive()) {
         this.userIdsWithFullProjectVisibility = projectManagerUserIds;
       } else {
         const adminUserIds = await this.getAdminUserIds();

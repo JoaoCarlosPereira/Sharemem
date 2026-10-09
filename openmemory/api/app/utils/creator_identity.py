@@ -49,22 +49,27 @@ def resolve_creator_identities_with_db(
     from app.models import Machine, MachineStatus, User
 
     try:
-        rows = (
-            db.query(
-                Machine.hostname,
-                User.display_name,
-                User.avatar_url,
-                User.name,
-                User.email,
+        # This lookup is optional enrichment. If a rolling deployment leaves
+        # identity tables/columns temporarily out of sync, PostgreSQL marks the
+        # current transaction as failed after the SELECT error. Keep that error
+        # inside a savepoint so the caller can continue its primary read.
+        with db.begin_nested():
+            rows = (
+                db.query(
+                    Machine.hostname,
+                    User.display_name,
+                    User.avatar_url,
+                    User.name,
+                    User.email,
+                )
+                .join(User, Machine.linked_user_id == User.id)
+                .filter(
+                    Machine.hostname.in_(keys),
+                    Machine.status == MachineStatus.linked,
+                    Machine.linked_user_id.isnot(None),
+                )
+                .all()
             )
-            .join(User, Machine.linked_user_id == User.id)
-            .filter(
-                Machine.hostname.in_(keys),
-                Machine.status == MachineStatus.linked,
-                Machine.linked_user_id.isnot(None),
-            )
-            .all()
-        )
         return {
             hostname: CreatorIdentity(
                 display_name=display_name or name,
@@ -247,7 +252,10 @@ def resolve_actor_identities_with_db(
 
         users: list[User] = []
         if clauses:
-            users = db.query(User).filter(or_(*clauses)).all()
+            # Like hostname enrichment above, this is display-only data. A
+            # schema mismatch must not poison the session used by list_tasks.
+            with db.begin_nested():
+                users = db.query(User).filter(or_(*clauses)).all()
 
         # Deduplicate by id while registering all lookup aliases.
         seen_user_ids: set[Any] = set()
@@ -292,3 +300,204 @@ def identity_for_actor(
     if lowered in identities:
         return identities[lowered]
     return identity_for_hostname(key, identities)
+
+
+# --------------------------------------------------------------------------- #
+# Reader / actor strings as stored in ``read_audit_logs``
+#
+# The ``hostname`` column holds the reader, but how far it can be trusted
+# depends on the row's ``source`` (channel):
+#   * Web UI (``api`` / ``admin``): ``ui:<User.id>`` is written ONLY by
+#     ``ui_reader_actor`` from a server-validated session JWT (``sub``), so it is
+#     resolved to that person. Any other ``ui:`` value (``ui:anonymous``, the
+#     shared build id ``ui:S0293`` in historical rows, …) is anonymous.
+#   * Every other channel (``mcp``, ``compat_v3``, unknown): the value is
+#     client-asserted (MCP path segment / compat header). It is resolved ONLY as
+#     a machine hostname (linked ``Machine``), exactly as before card 01ada614.
+#     ``ui:<uuid>``, a bare UUID, an e-mail or a ``User.user_id`` are treated as
+#     plain hostnames and never as a session/person reference — otherwise any
+#     agent could impersonate a colleague by sending their id.
+# --------------------------------------------------------------------------- #
+UI_ACTOR_PREFIX = "ui:"
+# Neutral actor for Web UI reads without a Google session. The REST ``?user_id=``
+# sent by the UI is the build-time ``NEXT_PUBLIC_USER_ID`` (``OPENMEMORY_UI_USER_ID``)
+# shared by EVERY browser, so it must never be shown as a person.
+UI_ANONYMOUS_ACTOR = "ui:anonymous"
+UI_ANONYMOUS_LABEL = "Interface Web (sem login)"
+# Sources written by the Web UI routers, where ``ui:<uuid>`` comes from a session.
+WEB_SESSION_SOURCES = frozenset({"api", "admin"})
+
+
+def is_web_session_source(source: Optional[str]) -> bool:
+    return (source or "").strip().lower() in WEB_SESSION_SOURCES
+
+
+def split_ui_actor(raw: Optional[str]) -> Optional[str]:
+    """Return ``user_id`` for ``ui:<user_id>`` actors, else ``None``."""
+    if not raw:
+        return None
+    text = str(raw).strip()
+    if not text.startswith(UI_ACTOR_PREFIX):
+        return None
+    inner = text[len(UI_ACTOR_PREFIX):].strip()
+    return inner or None
+
+
+def session_user_pk(raw: Optional[str]):
+    """``User.id`` (UUID) for a ``ui:<uuid>`` actor, else ``None``.
+
+    Only meaningful for Web UI rows (:data:`WEB_SESSION_SOURCES`).
+    """
+    from uuid import UUID
+
+    inner = split_ui_actor(raw)
+    if not inner:
+        return None
+    try:
+        return UUID(inner)
+    except ValueError:
+        return None
+
+
+def is_anonymous_ui_actor(raw: Optional[str]) -> bool:
+    """True for Web UI ``ui:`` actors that carry no session person.
+
+    Only ``ui:<User.id UUID>`` identifies a person; every other ``ui:`` value is
+    anonymous — including historical ``ui:<NEXT_PUBLIC_USER_ID>`` rows (e.g.
+    ``ui:S0293``), written for every viewer. Independent of
+    ``OPENMEMORY_UI_USER_ID`` being set on the API container.
+    """
+    if not raw or not str(raw).strip().startswith(UI_ACTOR_PREFIX):
+        return False
+    return session_user_pk(raw) is None
+
+
+def _has_display(identity: Optional[CreatorIdentity]) -> bool:
+    return bool(identity and (identity.display_name or identity.avatar_url))
+
+
+def _resolve_session_readers(db: Session, actors: set[str]) -> dict[str, CreatorIdentity]:
+    """``ui:<User.id>`` → person, by primary key only (no e-mail / user_id)."""
+    from app.models import User
+
+    pks = {actor: session_user_pk(actor) for actor in actors}
+    wanted = {pk for pk in pks.values() if pk is not None}
+    if not wanted:
+        return {}
+    users = {user.id: user for user in db.query(User).filter(User.id.in_(wanted)).all()}
+    result: dict[str, CreatorIdentity] = {}
+    for actor, pk in pks.items():
+        user = users.get(pk)
+        if user is None:
+            continue
+        identity = CreatorIdentity(
+            display_name=user.display_name or user.name,
+            avatar_url=user.avatar_url,
+            email=(user.email or "").strip().lower() or None,
+        )
+        if _has_display(identity):
+            result[actor] = identity
+    return result
+
+
+def _resolve_hostname_readers(db: Session, actors: set[str]) -> dict[str, CreatorIdentity]:
+    """Client-asserted actors → person via linked machine hostname only."""
+    host_map = resolve_creator_identities_with_db(db, actors)
+    result: dict[str, CreatorIdentity] = {}
+    for actor in actors:
+        identity = identity_for_hostname(actor, host_map)
+        if _has_display(identity):
+            result[actor] = identity  # type: ignore[assignment]
+    return result
+
+
+def resolve_reader_identities_with_db(
+    db: Session,
+    readers: Iterable[tuple[Optional[str], Optional[str]]],
+) -> dict[tuple[str, bool], CreatorIdentity]:
+    """Resolve ``(actor, source)`` pairs from ``read_audit_logs`` to people.
+
+    Returns a map keyed by ``(actor, is_web_session_source)``. Web UI rows
+    resolve only ``ui:<User.id>``; all other channels resolve only by machine
+    hostname (see module notes above). Identities without a name/avatar are
+    omitted so callers keep the hostname label. Best-effort: never raises.
+    """
+    session_actors: set[str] = set()
+    host_actors: set[str] = set()
+    requested: set[tuple[str, bool]] = set()
+    for actor, source in readers:
+        text = str(actor or "").strip()
+        if not text:
+            continue
+        web = is_web_session_source(source)
+        if web:
+            if session_user_pk(text) is not None:
+                session_actors.add(text)
+            elif text.startswith(UI_ACTOR_PREFIX):
+                continue  # anonymous / shared build id: never a person
+            else:
+                host_actors.add(text)  # legacy UI rows without prefix: hostname only
+        else:
+            host_actors.add(text)
+        requested.add((text, web))
+
+    result: dict[tuple[str, bool], CreatorIdentity] = {}
+    try:
+        by_session = _resolve_session_readers(db, session_actors)
+        by_host = _resolve_hostname_readers(db, host_actors)
+    except Exception:  # noqa: BLE001 - enrichment is best-effort on read paths
+        return result
+    for text, web in requested:
+        identity = by_session.get(text) if web and text in session_actors else by_host.get(text)
+        if identity is not None:
+            result[(text, web)] = identity
+    return result
+
+
+def enrich_reader_items(
+    items: list[dict[str, Any]],
+    *,
+    actor_key: str = "hostname",
+    source_key: str = "source",
+    display_name_key: str = "display_name",
+    avatar_url_key: str = "avatar_url",
+) -> None:
+    """Attach person name/avatar to access-log rows, honouring the channel.
+
+    Web UI rows without a session person get the neutral label and no avatar.
+    """
+    readers: list[tuple[str, Optional[str]]] = []
+    for item in items:
+        actor = str(item.get(actor_key) or "").strip()
+        web = is_web_session_source(item.get(source_key))
+        if web and is_anonymous_ui_actor(actor):
+            item[display_name_key] = UI_ANONYMOUS_LABEL
+            item.pop(avatar_url_key, None)
+            item["anonymous"] = True
+            continue
+        if actor:
+            readers.append((actor, item.get(source_key)))
+    if not readers:
+        return
+
+    from app.database import SessionLocal
+
+    db = SessionLocal()
+    try:
+        identities = resolve_reader_identities_with_db(db, readers)
+    except Exception:  # noqa: BLE001 - enrichment is best-effort on read paths
+        return
+    finally:
+        db.close()
+
+    for item in items:
+        if item.get("anonymous"):
+            continue
+        actor = str(item.get(actor_key) or "").strip()
+        identity = identities.get((actor, is_web_session_source(item.get(source_key))))
+        if identity is None:
+            continue
+        if identity.display_name:
+            item[display_name_key] = identity.display_name
+        if identity.avatar_url:
+            item[avatar_url_key] = identity.avatar_url

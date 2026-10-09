@@ -15,6 +15,7 @@ import { useSelector } from "react-redux"
 import { RootState } from "@/store/store"
 import { APP_NAME } from "@/lib/branding"
 import { getApiUrl } from "@/lib/api-url";
+import { CLEARED_SECRET, isMaskedSecret, nextSecretInput } from "@/lib/secret-mask";
 
 interface FormViewProps {
   settings: any
@@ -265,7 +266,12 @@ export function FormView({ settings, onChange }: FormViewProps) {
                   type={showLlmApiKey ? "text" : "password"}
                   placeholder="env:API_KEY"
                   value={settings.mem0?.llm?.config?.api_key || ""}
-                  onChange={(e) => handleLlmConfigChange("api_key", e.target.value)}
+                  onChange={(e) =>
+                    handleLlmConfigChange(
+                      "api_key",
+                      nextSecretInput(settings.mem0?.llm?.config?.api_key, e.target.value),
+                    )
+                  }
                 />
                 <Button 
                   variant="ghost" 
@@ -280,6 +286,23 @@ export function FormView({ settings, onChange }: FormViewProps) {
               <p className="text-xs text-muted-foreground mt-1">
                 Use "env:API_KEY" para carregar de variável de ambiente, ou informe diretamente
               </p>
+              {isMaskedSecret(settings.mem0?.llm?.config?.api_key) && (
+                <div className="flex items-center justify-between gap-2">
+                  <p className="text-xs text-muted-foreground" data-testid="llm-api-key-masked-hint">
+                    Chave salva (mascarada). Mantenha, ou apague o campo, para preservar a atual; digite uma nova para trocar.
+                  </p>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    type="button"
+                    className="h-7 text-xs"
+                    data-testid="llm-api-key-clear"
+                    onClick={() => handleLlmConfigChange("api_key", CLEARED_SECRET)}
+                  >
+                    Remover chave
+                  </Button>
+                </div>
+              )}
             </div>
           )}
 
@@ -394,7 +417,12 @@ export function FormView({ settings, onChange }: FormViewProps) {
                   type={showEmbedderApiKey ? "text" : "password"}
                   placeholder="env:API_KEY"
                   value={settings.mem0?.embedder?.config?.api_key || ""}
-                  onChange={(e) => handleEmbedderConfigChange("api_key", e.target.value)}
+                  onChange={(e) =>
+                    handleEmbedderConfigChange(
+                      "api_key",
+                      nextSecretInput(settings.mem0?.embedder?.config?.api_key, e.target.value),
+                    )
+                  }
                 />
                 <Button 
                   variant="ghost" 
@@ -409,6 +437,23 @@ export function FormView({ settings, onChange }: FormViewProps) {
               <p className="text-xs text-muted-foreground mt-1">
                 Use "env:API_KEY" para carregar de variável de ambiente, ou informe diretamente
               </p>
+              {isMaskedSecret(settings.mem0?.embedder?.config?.api_key) && (
+                <div className="flex items-center justify-between gap-2">
+                  <p className="text-xs text-muted-foreground" data-testid="embedder-api-key-masked-hint">
+                    Chave salva (mascarada). Mantenha, ou apague o campo, para preservar a atual; digite uma nova para trocar.
+                  </p>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    type="button"
+                    className="h-7 text-xs"
+                    data-testid="embedder-api-key-clear"
+                    onClick={() => handleEmbedderConfigChange("api_key", CLEARED_SECRET)}
+                  >
+                    Remover chave
+                  </Button>
+                </div>
+              )}
             </div>
           )}
         </CardContent>

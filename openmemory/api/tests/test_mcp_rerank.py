@@ -169,9 +169,15 @@ class TestRerankOrdering:
         assert [r["id"] for r in data["results"]][0] == "underdog"
 
     @pytest.mark.asyncio
-    async def test_rerank_sees_whole_candidate_pool(self, patched_client, monkeypatch):
-        """Reranking runs before the page cut, not on the already-trimmed page."""
+    async def test_rerank_sees_more_than_the_page(self, patched_client, monkeypatch):
+        """Reranking runs before the page cut, not on the already-trimmed page.
+
+        Since card 80110071 only the best MEM0_RERANKER_TOP_N of the blended
+        ranking are rescored (bounded CPU cost); with TOP_N above the pool size the
+        whole pool still reaches the cross-encoder.
+        """
         monkeypatch.setenv("MEM0_RERANKER_PROVIDER", "stub")
+        monkeypatch.setenv("MEM0_RERANKER_TOP_N", "1000")
         stub = _StubReranker(preferred=set())
         monkeypatch.setattr(reranking, "_reranker", stub)
         monkeypatch.setattr(reranking, "_loaded", True)
