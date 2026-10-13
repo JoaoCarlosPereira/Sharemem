@@ -113,3 +113,36 @@ def test_marketplace_agrega_plugin_empacotado():
     assert plugin["name"] == "demo-plugin"
     assert plugin["version"] == "1.2.3"
     assert plugin["source"]["source"] == "url"
+
+
+def test_marketplace_plugin_git_usa_manifesto_resolvido_ref_e_omite_nulos():
+    client, registry = app_client()
+    registry.resource = {
+        "kind": "Plugin",
+        "metadata": {"name": "demo-plugin", "tag": "latest"},
+        "spec": {
+            "description": "Plugin interno publicado por Git.",
+            "source": {
+                "type": "git",
+                "git": {
+                    "repository": {
+                        "url": "https://example.com/team/demo-plugin.git",
+                        "branch": "plugin/demo-plugin-1.2.3",
+                    }
+                },
+            },
+        },
+        "status": {"manifest": {**MANIFEST, "author": {"name": "Equipe"}}},
+    }
+    response = client.get("/api/v1/store/marketplace.json")
+    assert response.status_code == 200
+    plugin = response.json()["plugins"][0]
+    assert plugin["version"] == "1.2.3"
+    assert plugin["author"] == {"name": "Equipe"}
+    assert plugin["source"] == {
+        "source": "url",
+        "url": "https://example.com/team/demo-plugin.git",
+        "ref": "plugin/demo-plugin-1.2.3",
+    }
+    assert None not in plugin.values()
+    assert "homepage" not in plugin
