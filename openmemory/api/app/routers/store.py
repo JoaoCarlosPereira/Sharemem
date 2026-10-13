@@ -66,6 +66,33 @@ def get_registry_client() -> AgentRegistryHttpClient:
     return AgentRegistryHttpClient()
 
 
+def _git_plugin_source(repository: dict) -> dict:
+    plugin_source = {"source": "url", "url": repository["url"]}
+    subfolder = (repository.get("subfolder") or "").strip("/")
+    if subfolder:
+        plugin_source = {"source": "git-subdir", "url": repository["url"], "path": subfolder}
+    published_ref = repository.get("branch")
+    if published_ref:
+        plugin_source["ref"] = published_ref
+    return plugin_source
+
+
+def _marketplace_author(author) -> Optional[dict]:
+    if isinstance(author, str) and author.strip():
+        return {"name": author.strip()}
+    if isinstance(author, dict) and author.get("name"):
+        return author
+    return None
+
+
+def _marketplace_repository(repository) -> Optional[str]:
+    if isinstance(repository, dict):
+        repository = repository.get("url")
+    if isinstance(repository, str) and repository.strip():
+        return repository.strip()
+    return None
+
+
 @router.get("/marketplace.json")
 async def get_plugin_marketplace(
     request: Request,
@@ -85,12 +112,13 @@ async def get_plugin_marketplace(
     for resource in result.get("items") or []:
         metadata = resource.get("metadata") or {}
         spec = resource.get("spec") or {}
-        manifest = spec.get("manifest") or {}
+        resolved_manifest = (resource.get("status") or {}).get("manifest")
+        manifest = spec.get("manifest") or resolved_manifest or {}
         source = spec.get("source") or {}
         plugin_source = None
         repository = ((source.get("git") or {}).get("repository") or {})
         if source.get("type") == "git" and repository.get("url"):
-            plugin_source = {"source": "url", "url": repository["url"]}
+            plugin_source = _git_plugin_source(repository)
         elif source.get("type") == "artifact":
             plugin_source = {
                 "source": "url",
@@ -99,20 +127,19 @@ async def get_plugin_marketplace(
             }
         if not plugin_source:
             continue
-        entries.append(
-            {
-                "name": metadata.get("name"),
-                "source": plugin_source,
-                "description": spec.get("description") or manifest.get("description"),
-                "version": spec.get("version") or manifest.get("version"),
-                "author": manifest.get("author"),
-                "homepage": manifest.get("homepage"),
-                "repository": manifest.get("repository"),
-                "license": manifest.get("license"),
-                "keywords": manifest.get("keywords") or [],
-                "category": "development",
-            }
-        )
+        entry = {
+            "name": metadata.get("name"),
+            "source": plugin_source,
+            "description": spec.get("description") or manifest.get("description"),
+            "version": spec.get("version") or manifest.get("version"),
+            "author": _marketplace_author(manifest.get("author")),
+            "homepage": manifest.get("homepage"),
+            "repository": _marketplace_repository(manifest.get("repository")),
+            "license": manifest.get("license"),
+            "keywords": manifest.get("keywords") or [],
+            "category": "development",
+        }
+        entries.append({key: value for key, value in entry.items() if value is not None})
     return {
         "name": os.getenv("SHAREMEM_MARKETPLACE_NAME", "sharemem"),
         "owner": {
