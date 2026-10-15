@@ -245,6 +245,23 @@ class TestSeguranca(Base):
         self.assertEqual(segunda.adotados, ["hook b", "hook c"])
         self.assertIn("ultima_verificacao", at.ler_json(self.claude / at.ESTADO))
 
+    def test_rodada_interrompida_nao_herda_a_verificacao_anterior(self):
+        self.loja.publicar("hook", "a", {"HOOK.md": b"a"})
+        self.instalar_manual("hook", "a", {"HOOK.md": b"a"})
+        self.rodar(SHAREMEM_STORE_FORCAR="0")
+        for nome in ("b", "c"):
+            self.loja.publicar("hook", nome, {"HOOK.md": nome.encode()})
+            self.instalar_manual("hook", nome, {"HOOK.md": nome.encode()})
+        self.loja.limite_downloads = self.loja.downloads + 1
+
+        interrompida = self.rodar()
+        self.assertEqual(interrompida.adotados, ["hook b"])
+
+        self.loja.limite_downloads = None
+        retomada = self.rodar(SHAREMEM_STORE_FORCAR="0")
+        self.assertIsNotNone(retomada, "a retomada não pode esperar o intervalo da verificação anterior")
+        self.assertEqual(retomada.adotados, ["hook c"])
+
     def test_falha_na_consulta_nao_marca_a_verificacao(self):
         class Fora:
             def atualizacoes(self, pacotes):

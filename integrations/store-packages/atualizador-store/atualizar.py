@@ -372,6 +372,8 @@ def executar(claude_dir, claude_json, env, http=None, agora=None):
                 continue
         if concluida:
             estado["ultima_verificacao"] = agora
+        else:
+            estado.pop("ultima_verificacao", None)
         estado["avisados"] = avisados
         gravar_json(claude_dir / ESTADO, estado)
         return resultado
