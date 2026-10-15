@@ -57,7 +57,23 @@ Usa o servidor e o token de agente da URL do MCP `mem0` (ou `sharemem`) em
 
 ## Requisitos
 
-`python` 3.8+ no PATH (só biblioteca padrão).
+Python 3.8+ (só biblioteca padrão). O comando do hook (`eventos.json`) tenta
+`python3`, `python` e `py`, nessa ordem, e usa o primeiro que **executa** de fato:
+no Windows, `python` e `python3` podem ser atalhos da Microsoft Store que existem no
+PATH mas falham ao rodar, e aí só o launcher `py` funciona. Sem nenhum Python, o
+hook não faz nada e a sessão segue normalmente.
+
+## Rodar à mão
+
+Forçando a verificação, sem esperar as 6 h:
+
+- Git Bash: `SHAREMEM_STORE_FORCAR=1 py ~/.claude/hooks/atualizador-store/atualizar.py`
+- PowerShell: `$env:SHAREMEM_STORE_FORCAR=1; py $HOME\.claude\hooks\atualizador-store\atualizar.py`
+- Prompt de Comando (cmd): `set "SHAREMEM_STORE_FORCAR=1"` e depois
+  `py %USERPROFILE%\.claude\hooks\atualizador-store\atualizar.py`
+
+Troque `py` por `python` se for esse o Python da máquina. A saída só aparece
+quando há algo novo.
 
 ## Testes
 
