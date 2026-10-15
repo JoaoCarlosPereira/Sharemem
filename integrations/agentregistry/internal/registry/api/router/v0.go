@@ -20,6 +20,7 @@ import (
 	arv0 "github.com/agentregistry-dev/agentregistry/pkg/api/v0"
 	"github.com/agentregistry-dev/agentregistry/pkg/api/v1alpha1"
 	"github.com/agentregistry-dev/agentregistry/pkg/api/v1alpha1/registries"
+	"github.com/agentregistry-dev/agentregistry/pkg/registry/artifact"
 	"github.com/agentregistry-dev/agentregistry/pkg/registry/resource"
 	"github.com/agentregistry-dev/agentregistry/pkg/registry/v1alpha1store"
 	"github.com/agentregistry-dev/agentregistry/pkg/types"
@@ -226,6 +227,8 @@ func registerKindRoutes(
 			Plural:     v1alpha1.PluralFor(v1alpha1.KindHook),
 			MediaType:  skillartifact.HookMediaType,
 			Label:      v1alpha1.KindHook,
+
+			RequiredRootFiles: []string{artifact.HookRootFile},
 		})
 	}
 

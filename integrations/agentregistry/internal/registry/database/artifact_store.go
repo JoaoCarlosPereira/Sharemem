@@ -27,17 +27,29 @@ type PostgresArtifactStore struct {
 	linkTable      string
 	// label names the kind in error messages ("skill", "hook").
 	label string
+	// requiredRootFiles and mediaType are the package contract of the kind.
+	requiredRootFiles []string
+	mediaType         string
 }
 
 // NewPostgresArtifactStore binds the store to the Skill association table.
 func NewPostgresArtifactStore(pool *pgxpool.Pool, schema pkgdb.Schema) *PostgresArtifactStore {
-	return newPostgresArtifactStore(pool, schema, "skill_artifacts", "skill")
+	return newPostgresArtifactStore(pool, schema, "skill_artifacts", "skill",
+		artifact.MediaTypeTarGzip, artifact.SkillRootFile)
 }
 
 // NewPostgresHookArtifactStore binds the store to the Hook association table.
 // Hooks that ship executable files package them exactly like a complete Skill.
 func NewPostgresHookArtifactStore(pool *pgxpool.Pool, schema pkgdb.Schema) *PostgresArtifactStore {
-	return newPostgresArtifactStore(pool, schema, "hook_artifacts", "hook")
+	return newPostgresArtifactStore(pool, schema, "hook_artifacts", "hook",
+		artifact.HookMediaTypeTarGzip, artifact.HookRootFile)
+}
+
+// NewPostgresPluginArtifactStore binds the store to the Plugin association
+// table (migration 015).
+func NewPostgresPluginArtifactStore(pool *pgxpool.Pool, schema pkgdb.Schema) *PostgresArtifactStore {
+	return newPostgresArtifactStore(pool, schema, "plugin_artifacts", "plugin",
+		artifact.PluginMediaTypeTarGzip, artifact.PluginRootFile, artifact.PluginReadmeFile)
 }
 
 func newPostgresArtifactStore(
@@ -45,12 +57,16 @@ func newPostgresArtifactStore(
 	schema pkgdb.Schema,
 	linkTable string,
 	label string,
+	mediaType string,
+	requiredRootFiles ...string,
 ) *PostgresArtifactStore {
 	return &PostgresArtifactStore{
-		pool:           pool,
-		artifactsTable: schema.Qualify("artifacts"),
-		linkTable:      schema.Qualify(linkTable),
-		label:          label,
+		pool:              pool,
+		artifactsTable:    schema.Qualify("artifacts"),
+		linkTable:         schema.Qualify(linkTable),
+		label:             label,
+		requiredRootFiles: requiredRootFiles,
+		mediaType:         mediaType,
 	}
 }
 
@@ -58,13 +74,13 @@ func (s *PostgresArtifactStore) Put(ctx context.Context, ref artifact.SkillRef, 
 	if err := validateArtifactRef(ref); err != nil {
 		return artifact.Descriptor{}, err
 	}
-	if _, err := artifact.Validate(archive); err != nil {
+	if _, err := artifact.ValidatePackage(archive, s.requiredRootFiles...); err != nil {
 		return artifact.Descriptor{}, err
 	}
 	sum := sha256.Sum256(archive)
 	descriptor := artifact.Descriptor{
 		Digest:    hex.EncodeToString(sum[:]),
-		MediaType: artifact.MediaTypeTarGzip,
+		MediaType: s.mediaType,
 		Size:      int64(len(archive)),
 	}
 	tx, err := s.pool.Begin(ctx)
@@ -131,7 +147,7 @@ func (s *PostgresArtifactStore) ListFiles(ctx context.Context, ref artifact.Skil
 	if err != nil {
 		return nil, err
 	}
-	files, err := artifact.Validate(stored.Archive)
+	files, err := artifact.ValidatePackage(stored.Archive, s.requiredRootFiles...)
 	if err != nil {
 		return nil, fmt.Errorf("list %s artifact files: %w", s.label, err)
 	}
