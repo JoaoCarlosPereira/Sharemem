@@ -50,6 +50,9 @@ type Config struct {
 	Plural    string
 	MediaType string
 	Label     string
+	// RequiredRootFiles are the files the kind's package must carry at the
+	// root; zero value defaults to the Skill contract (SKILL.md).
+	RequiredRootFiles []string
 }
 
 func (c Config) withDefaults() Config {
@@ -64,6 +67,9 @@ func (c Config) withDefaults() Config {
 	}
 	if c.Label == "" {
 		c.Label = c.Kind
+	}
+	if len(c.RequiredRootFiles) == 0 {
+		c.RequiredRootFiles = []string{artifact.SkillRootFile}
 	}
 	return c
 }
@@ -206,7 +212,7 @@ func Register(api huma.API, cfg Config) {
 		if readErr != nil {
 			return nil, huma.Error500InternalServerError("read "+cfg.Label+" artifact", readErr)
 		}
-		files, readErr := artifact.ReadFiles(archiveData)
+		files, readErr := artifact.ReadPackageFiles(archiveData, cfg.RequiredRootFiles...)
 		if readErr != nil {
 			return nil, huma.Error500InternalServerError("validate "+cfg.Label+" artifact", readErr)
 		}

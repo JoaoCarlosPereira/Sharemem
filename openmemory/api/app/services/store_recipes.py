@@ -391,6 +391,19 @@ def _hook_package_destination(target: str, name: str) -> Optional[str]:
     return template.format(name=name) if template else None
 
 
+def _hook_package_scripts(events: dict[str, Any]) -> list[str]:
+    """Nomes dos arquivos que os comandos executam a partir de ${HOOK_DIR}."""
+    pattern = re.compile(r"\$\{" + re.escape(HOOK_DIR_PLACEHOLDER) + r"\}/([\w./-]+)")
+    scripts: set[str] = set()
+    for groups in events.values():
+        for group in groups if isinstance(groups, list) else []:
+            for entry in (group or {}).get("hooks") or []:
+                command = (entry or {}).get("command")
+                if isinstance(command, str):
+                    scripts.update(m.group(1).rsplit("/", 1)[-1] for m in pattern.finditer(command))
+    return sorted(scripts)
+
+
 def _hook_steps(
     target: str,
     name: str,
@@ -439,6 +452,8 @@ def _hook_steps(
             }
         )
 
+    legacy_scripts = _hook_package_scripts(events)
+    packages_root = package_destination.rsplit("/", 1)[0]
     steps.append(
         {
             "id": "merge-hook-events",
@@ -450,7 +465,11 @@ def _hook_steps(
                 "hooks do arquivo em path, preservando o que já existe. "
                 "Antes de escrever, troque ${HOOK_DIR} pelos valores de "
                 "placeholders. Se já houver entrada idêntica deste mesmo hook, "
-                "substitua no lugar em vez de acrescentar."
+                "substitua no lugar em vez de acrescentar. Remova também, nos "
+                "mesmos eventos, as entradas cujo command execute um arquivo "
+                "com nome listado em replaces_legacy_scripts fora de "
+                "legacy_scripts_outside: são cópias instaladas à mão antes da "
+                "Store e disparariam em dobro. Informe ao usuário o que removeu."
             ),
             "path": destination,
             # `key` names the settings block the events belong under, so a host
@@ -463,6 +482,12 @@ def _hook_steps(
             "strategy": "replace_owned_entries",
             "owner": {"kind": "hook", "name": name},
             "placeholders": {HOOK_DIR_PLACEHOLDER: package_destination},
+            # Instalação manual anterior (ex.: node ~/.claude/mem0/mem0-hook.mjs)
+            # não tem dono e o replace_owned_entries não a enxerga. Só conta
+            # como legado o script fora da pasta de pacotes: dois pacotes da
+            # Store podem ter um verificar.py cada um.
+            "replaces_legacy_scripts": legacy_scripts,
+            "legacy_scripts_outside": packages_root,
             "idempotent": True,
         }
     )

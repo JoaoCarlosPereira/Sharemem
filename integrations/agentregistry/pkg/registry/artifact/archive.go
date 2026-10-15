@@ -18,7 +18,16 @@ import (
 )
 
 const (
-	MediaTypeTarGzip = "application/vnd.agentregistry.skill.v1.tar+gzip"
+	MediaTypeTarGzip       = "application/vnd.agentregistry.skill.v1.tar+gzip"
+	HookMediaTypeTarGzip   = "application/vnd.agentregistry.hook.v1.tar+gzip"
+	PluginMediaTypeTarGzip = "application/vnd.agentregistry.plugin.v1.tar+gzip"
+
+	// Root files each package kind must carry. A Hook package has the same
+	// tar.gz shape as a Skill package but is described by HOOK.md.
+	SkillRootFile    = "SKILL.md"
+	HookRootFile     = "HOOK.md"
+	PluginRootFile   = ".claude-plugin/plugin.json"
+	PluginReadmeFile = "README.md"
 
 	MaxArchiveBytes      int64 = 16 << 20
 	MaxUncompressedBytes int64 = 32 << 20
@@ -27,7 +36,7 @@ const (
 	MaxPathBytes               = 240
 )
 
-var ErrInvalidArchive = errors.New("invalid skill artifact archive")
+var ErrInvalidArchive = errors.New("invalid package artifact archive")
 
 type File struct {
 	Path string
@@ -150,7 +159,14 @@ func PackFiles(files map[string][]byte) ([]byte, error) {
 	return out.Bytes(), nil
 }
 
+// Validate checks a Skill package (SKILL.md at the root).
 func Validate(data []byte) ([]File, error) {
+	return ValidatePackage(data, SkillRootFile)
+}
+
+// ValidatePackage checks the archive shape shared by every package kind and
+// that each of requiredRootFiles is present as a regular file.
+func ValidatePackage(data []byte, requiredRootFiles ...string) ([]File, error) {
 	if len(data) == 0 {
 		return nil, fmt.Errorf("%w: archive is empty", ErrInvalidArchive)
 	}
@@ -168,7 +184,7 @@ func Validate(data []byte) ([]File, error) {
 	seen := map[string]struct{}{}
 	files := make([]File, 0)
 	var total int64
-	hasSkillMD := false
+	present := map[string]struct{}{}
 	for {
 		header, err := tr.Next()
 		if errors.Is(err, io.EOF) {
@@ -207,19 +223,25 @@ func Validate(data []byte) ([]File, error) {
 			return nil, fmt.Errorf("%w: read file %q: %v", ErrInvalidArchive, name, err)
 		}
 		files = append(files, File{Path: name, Size: header.Size, Mode: header.Mode})
-		if name == "SKILL.md" {
-			hasSkillMD = true
-		}
+		present[name] = struct{}{}
 	}
-	if !hasSkillMD {
-		return nil, fmt.Errorf("%w: SKILL.md is required at archive root", ErrInvalidArchive)
+	for _, required := range requiredRootFiles {
+		if _, ok := present[required]; !ok {
+			return nil, fmt.Errorf("%w: %s is required at archive root", ErrInvalidArchive, required)
+		}
 	}
 	slices.SortFunc(files, func(a, b File) int { return strings.Compare(a.Path, b.Path) })
 	return files, nil
 }
 
+// ReadFiles returns the files of a Skill package.
 func ReadFiles(data []byte) ([]ContentFile, error) {
-	if _, err := Validate(data); err != nil {
+	return ReadPackageFiles(data, SkillRootFile)
+}
+
+// ReadPackageFiles returns the files of a package after ValidatePackage.
+func ReadPackageFiles(data []byte, requiredRootFiles ...string) ([]ContentFile, error) {
+	if _, err := ValidatePackage(data, requiredRootFiles...); err != nil {
 		return nil, err
 	}
 	gz, err := gzip.NewReader(bytes.NewReader(data))
