@@ -19,7 +19,8 @@ versão nova publicada e, quando têm, atualiza os arquivos sozinho.
 
 ## Como atualiza
 
-1. Consulta `POST /api/v1/store/install-recipes` para saber o digest publicado.
+1. Consulta `POST /api/v1/store/updates` uma vez só, com a lista de pacotes da
+   máquina, e recebe a receita atual de cada um que existe na Store.
 2. Se mudou, baixa o artefato, confere o sha256 e recusa entradas com caminho
    absoluto, `..` ou link.
 3. Monta a pasta nova ao lado e troca de uma vez (renomeação); se algo falhar, a
@@ -44,6 +45,9 @@ Cada aviso aparece uma vez por versão publicada.
   `SHAREMEM_STORE_FORCAR=1` ignora o intervalo.
 - Prazo total de 20 s; qualquer falha de rede termina em silêncio, sem atrasar a sessão.
 - Uma sessão por vez (trava em `~/.claude/.sharemem-store-update.lock`).
+- Envia `X-Hostname` para o rate limit contar por máquina. Se o servidor responder
+  429, a rodada para e a verificação não é marcada como feita: a próxima sessão
+  continua de onde parou, sem esperar as 6 h.
 - Estado em `~/.claude/.sharemem-store-update.json`.
 
 ## Servidor e identidade

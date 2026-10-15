@@ -39,19 +39,23 @@ class LojaFalsa:
         self.publicados[(kind, nome)] = (dados, digest, eventos if kind == "hook" else None)
         return digest
 
-    def receita(self, kind, nome, tag):
-        if (kind, nome) not in self.publicados:
-            return None
+    def receita(self, kind, nome):
         _, digest, eventos = self.publicados[(kind, nome)]
         passos = [{"type": "download_and_extract"}]
         if eventos is not None:
             passos.append({"type": "merge_hooks", "content": {"hooks": eventos}})
-        return {"recipe": {
+        return {
             "source": {"type": "registry_artifact", "artifact_digest": digest, "endpoint": f"/a/{kind}/{nome}"},
             "steps": passos,
-        }}
+        }
+
+    def atualizacoes(self, pacotes):
+        self.consultas = getattr(self, "consultas", 0) + 1
+        return {(k, n): self.receita(k, n) for k, n, _ in pacotes if (k, n) in self.publicados}
 
     def artefato(self, endpoint):
+        if getattr(self, "limite_downloads", None) is not None and self.downloads >= self.limite_downloads:
+            raise at.Limite("429")
         self.downloads += 1
         _, kind, nome = endpoint.rsplit("/", 2)
         return self.publicados[(kind, nome)][0]
@@ -217,6 +221,39 @@ class TestSeguranca(Base):
             tar.addfile(info)
         with self.assertRaises(at.Falha):
             at.ler_pacote(saida.getvalue())
+
+    def test_uma_consulta_so_para_todos_os_pacotes(self):
+        for i in range(30):
+            self.instalar_manual("skill", f"minha-{i}", {"SKILL.md": b"#"})
+        self.loja.publicar("hook", "recall", {"HOOK.md": b"#"})
+        self.instalar_manual("hook", "recall", {"HOOK.md": b"#"})
+        self.rodar()
+        self.assertEqual(self.loja.consultas, 1)
+
+    def test_limite_do_servidor_para_a_rodada_e_retoma_na_proxima(self):
+        for nome in ("a", "b", "c"):
+            self.loja.publicar("hook", nome, {"HOOK.md": nome.encode()})
+            self.instalar_manual("hook", nome, {"HOOK.md": nome.encode()})
+        self.loja.limite_downloads = 1
+
+        primeira = self.rodar(SHAREMEM_STORE_FORCAR="0")
+        self.assertEqual(primeira.adotados, ["hook a"])
+        self.assertNotIn("ultima_verificacao", at.ler_json(self.claude / at.ESTADO))
+
+        self.loja.limite_downloads = None
+        segunda = self.rodar(SHAREMEM_STORE_FORCAR="0")
+        self.assertEqual(segunda.adotados, ["hook b", "hook c"])
+        self.assertIn("ultima_verificacao", at.ler_json(self.claude / at.ESTADO))
+
+    def test_falha_na_consulta_nao_marca_a_verificacao(self):
+        class Fora:
+            def atualizacoes(self, pacotes):
+                raise at.Falha("rede")
+
+        self.instalar_manual("hook", "x", {"HOOK.md": b"#"})
+        resultado = at.executar(self.claude, {}, {}, http=Fora(), agora=self.agora)
+        self.assertEqual(resultado.adotados, [])
+        self.assertNotIn("ultima_verificacao", at.ler_json(self.claude / at.ESTADO))
 
     def test_respeita_o_intervalo_entre_verificacoes(self):
         self.loja.publicar("hook", "recall", {"HOOK.md": b"#"})

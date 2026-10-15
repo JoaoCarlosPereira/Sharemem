@@ -5,6 +5,7 @@ import io
 import json
 import os
 import shutil
+import socket
 import sys
 import tarfile
 import tempfile
@@ -27,6 +28,10 @@ TIPOS = {"hook": ("hooks", "HOOK.md"), "skill": ("skills", "SKILL.md")}
 
 
 class Falha(Exception):
+    pass
+
+
+class Limite(Falha):
     pass
 
 
@@ -178,10 +183,11 @@ def novo_marcador(pacote, nome, tag, remoto, arquivos_hash):
 
 
 class Http:
-    def __init__(self, base, token, prazo):
+    def __init__(self, base, token, prazo, maquina=None):
         self.base = base
         self.token = token
         self.prazo = prazo
+        self.maquina = maquina or socket.gethostname()
 
     def _abrir(self, requisicao):
         restante = self.prazo - time.monotonic()
@@ -189,26 +195,35 @@ class Http:
             raise Falha("prazo esgotado")
         if self.token:
             requisicao.add_header("Authorization", f"Bearer {self.token}")
+        requisicao.add_header("X-Hostname", self.maquina)
         try:
             with urllib.request.urlopen(requisicao, timeout=min(TIMEOUT, restante)) as resposta:
                 return resposta.read()
         except urllib.error.HTTPError as erro:
             if erro.code == 404:
                 return None
+            if erro.code == 429:
+                raise Limite("limite de requisições do servidor") from erro
             raise Falha(f"HTTP {erro.code}") from erro
         except (urllib.error.URLError, OSError) as erro:
             raise Falha(str(erro)) from erro
 
-    def receita(self, kind, nome, tag):
-        corpo = json.dumps({"kind": kind, "name": nome, "tag": tag, "target": "claude"}).encode()
+    def atualizacoes(self, pacotes):
+        itens = [{"kind": kind, "name": nome, "tag": tag} for kind, nome, tag in pacotes]
         requisicao = urllib.request.Request(
-            f"{self.base}/api/v1/store/install-recipes",
-            data=corpo,
+            f"{self.base}/api/v1/store/updates",
+            data=json.dumps({"target": "claude", "packages": itens}).encode(),
             headers={"Content-Type": "application/json"},
             method="POST",
         )
         bruto = self._abrir(requisicao)
-        return json.loads(bruto) if bruto else None
+        if bruto is None:
+            raise Falha("servidor sem a rota de atualizações")
+        respostas = {}
+        for item in json.loads(bruto).get("packages") or []:
+            if item.get("found"):
+                respostas[(item.get("kind"), item.get("name"))] = item.get("recipe")
+        return respostas
 
     def artefato(self, endpoint):
         return self._abrir(urllib.request.Request(f"{self.base}{endpoint}"))
@@ -243,11 +258,16 @@ def baixar(http, remoto):
     return ler_pacote(dados)
 
 
-def verificar_pacote(http, pacote, resultado, avisados):
+def identidade(pacote):
     nome = (pacote.marcador or {}).get("name") or pacote.pasta.name
     tag = (pacote.marcador or {}).get("tag") or "latest"
+    return pacote.kind, nome, tag
+
+
+def verificar_pacote(http, pacote, receita, resultado, avisados):
+    _, nome, tag = identidade(pacote)
     rotulo = f"{pacote.kind} {nome}"
-    remoto = remoto_da_receita(http.receita(pacote.kind, nome, tag))
+    remoto = remoto_da_receita(receita)
     if remoto is None:
         return
 
@@ -332,12 +352,26 @@ def executar(claude_dir, claude_json, env, http=None, agora=None):
         http = http or Http(base_url(claude_json, env), agent_token(claude_json), time.monotonic() + PRAZO_TOTAL)
         resultado = Resultado()
         avisados = estado.get("avisados") or {}
-        for pacote in pacotes_instalados(claude_dir):
+        pacotes = pacotes_instalados(claude_dir)
+        concluida = True
+        try:
+            receitas = http.atualizacoes([identidade(p) for p in pacotes]) if pacotes else {}
+        except Falha:
+            receitas = {}
+            concluida = False
+        for pacote in pacotes:
+            kind, nome, _ = identidade(pacote)
+            if (kind, nome) not in receitas:
+                continue
             try:
-                verificar_pacote(http, pacote, resultado, avisados)
+                verificar_pacote(http, pacote, receitas[(kind, nome)], resultado, avisados)
+            except Limite:
+                concluida = False
+                break
             except Falha:
                 continue
-        estado["ultima_verificacao"] = agora
+        if concluida:
+            estado["ultima_verificacao"] = agora
         estado["avisados"] = avisados
         gravar_json(claude_dir / ESTADO, estado)
         return resultado
