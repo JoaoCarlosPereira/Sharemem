@@ -1,0 +1,14 @@
+{
+  "UserPromptSubmit": [
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "node \"${HOOK_DIR}/mem0-hook.mjs\"",
+          "timeout": 10,
+          "statusMessage": "Buscando memórias relevantes no ShareMem..."
+        }
+      ]
+    }
+  ]
+}
