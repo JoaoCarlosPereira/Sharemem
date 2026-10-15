@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -127,6 +128,36 @@ async def test_packaged_skill_recipe_prefers_complete_artifact_over_legacy_git()
     assert recipe["source"]["type"] == "registry_artifact"
     assert recipe["steps"][1]["type"] == "download_and_extract"
     assert recipe["steps"][1]["verify_artifact_sha256"] == "a" * 64
+
+
+@pytest.mark.asyncio
+async def test_packaged_skill_recipe_writes_store_marker_after_extract_for_claude():
+    registry = FakeRegistryClient(packaged_skill_resource())
+    recipe = await InstallRecipeService(registry_client=registry).build(
+        kind="skill", name="team-skill", tag="v1", target="claude", user_id="user-1"
+    )
+
+    ids = [step["id"] for step in recipe["steps"]]
+    assert ids.index("write-store-marker") == ids.index("download-and-extract-resource") + 1
+    marker_step = recipe["steps"][ids.index("write-store-marker")]
+    assert marker_step["path"] == "~/.claude/skills/team-skill/.sharemem-store.json"
+    assert json.loads(marker_step["content"]) == {
+        "kind": "skill", "name": "team-skill", "tag": "v1", "digest": "a" * 64,
+    }
+
+
+@pytest.mark.asyncio
+async def test_store_marker_is_only_for_claude_packages():
+    registry = FakeRegistryClient(packaged_skill_resource())
+    cursor = await InstallRecipeService(registry_client=registry).build(
+        kind="skill", name="team-skill", tag="v1", target="cursor", user_id="user-1"
+    )
+    legacy = await InstallRecipeService(registry_client=FakeRegistryClient(skill_resource())).build(
+        kind="skill", name="team-skill", tag="v1", target="claude", user_id="user-1"
+    )
+
+    assert all(step["id"] != "write-store-marker" for step in cursor["steps"])
+    assert all(step["id"] != "write-store-marker" for step in legacy["steps"])
 
 
 @pytest.mark.asyncio

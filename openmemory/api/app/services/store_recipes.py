@@ -37,6 +37,10 @@ HOOK_DIR_PLACEHOLDER = "HOOK_DIR"
 # AgentRegistry backend directly, so the artifact endpoint must be the public
 # passthrough in app/routers/store.py.
 STORE_API_PREFIX = "/api/v1/store"
+# Gravado na pasta do pacote: diz ao atualizador-store o que veio da Store, em
+# qual digest, e (para hooks) com quais eventos. Pasta sem ele nunca é tocada.
+STORE_MARKER_FILE = ".sharemem-store.json"
+STORE_MARKER_KINDS = frozenset({"skill", "hook"})
 
 TARGET_DESTINATIONS: dict[str, dict[str, str]] = {
     "cursor": {
@@ -155,6 +159,7 @@ class InstallRecipeService:
             steps = _hook_steps(safe_target, safe_name, destination, spec, source)
         else:
             steps = _file_steps(safe_kind, safe_name, destination, source, spec)
+        steps = _with_store_marker(steps, safe_kind, safe_name, safe_tag, safe_target, source, spec)
 
         return {
             "version": RECIPE_VERSION,
@@ -384,6 +389,49 @@ def _file_steps(
             "checks": [{"type": "exists"}, {"type": "resource_name", "value": name}],
         },
     ]
+
+
+def _with_store_marker(
+    steps: list[dict[str, Any]],
+    kind: str,
+    name: str,
+    tag: str,
+    target: str,
+    source: dict[str, Any],
+    spec: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Insere, logo após a extração, o marcador lido pelo atualizador-store."""
+    if target != "claude" or kind not in STORE_MARKER_KINDS:
+        return steps
+    if source.get("type") != "registry_artifact":
+        return steps
+    index = next(
+        (i for i, step in enumerate(steps) if step.get("type") == "download_and_extract"),
+        None,
+    )
+    if index is None:
+        return steps
+    marker: dict[str, Any] = {
+        "kind": kind,
+        "name": name,
+        "tag": tag,
+        "digest": source.get("artifact_digest"),
+    }
+    if kind == "hook":
+        marker["eventos"] = spec.get("events")
+    marker_step = {
+        "id": "write-store-marker",
+        "type": "write_file",
+        "description": (
+            "Grave content em path sem alterar. É o registro que permite ao "
+            "atualizador-store atualizar este pacote sozinho."
+        ),
+        "path": f"{steps[index]['to']}/{STORE_MARKER_FILE}",
+        "content": json.dumps(marker, ensure_ascii=False, indent=2) + "\n",
+        "overwrite": True,
+        "idempotent": True,
+    }
+    return [*steps[: index + 1], marker_step, *steps[index + 1 :]]
 
 
 def _hook_package_destination(target: str, name: str) -> Optional[str]:
