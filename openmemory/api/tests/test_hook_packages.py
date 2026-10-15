@@ -166,6 +166,33 @@ async def test_receita_extrai_pacote_e_faz_merge_no_settings():
 
 
 @pytest.mark.asyncio
+async def test_receita_pede_remocao_da_copia_manual_do_mesmo_script():
+    events = {
+        "UserPromptSubmit": [
+            {"hooks": [{"type": "command", "command": 'node "${HOOK_DIR}/mem0-hook.mjs"'}]}
+        ],
+        "PreToolUse": [
+            {
+                "matcher": "Bash",
+                "hooks": [
+                    {"type": "command", "command": "python ${HOOK_DIR}/lib/verificar.py"},
+                    {"type": "command", "command": "echo sem script"},
+                ],
+            }
+        ],
+    }
+    service = InstallRecipeService(registry_client=FakeRegistryClient(hook_resource(events=events)))
+    recipe = await service.build(
+        kind="hook", name="recall-memoria-mem0", tag="latest", target="claude", user_id="S0258"
+    )
+
+    merge = {step["id"]: step for step in recipe["steps"]}["merge-hook-events"]
+    assert merge["replaces_legacy_scripts"] == ["mem0-hook.mjs", "verificar.py"]
+    assert merge["legacy_scripts_outside"] == "~/.claude/hooks"
+    assert "replaces_legacy_scripts" in merge["description"]
+
+
+@pytest.mark.asyncio
 async def test_hook_sem_eventos_nao_gera_receita():
     service = InstallRecipeService(registry_client=FakeRegistryClient(hook_resource(events={})))
     with pytest.raises(InstallRecipeValidationError, match="eventos"):
