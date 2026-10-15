@@ -1,5 +1,7 @@
 """Cobertura do pacote de Hook e da receita de instalação de hooks."""
 
+import json
+
 import pytest
 
 from app.services.hook_packages import (
@@ -149,6 +151,11 @@ async def test_receita_extrai_pacote_e_faz_merge_no_settings():
     extract = steps["download-and-extract-hook-package"]
     assert extract["to"] == "~/.claude/hooks/bloqueio-db"
     assert extract["verify_artifact_sha256"] == "a" * 64
+
+    marker = json.loads(steps["write-store-marker"]["content"])
+    assert steps["write-store-marker"]["path"] == "~/.claude/hooks/bloqueio-db/.sharemem-store.json"
+    assert marker["digest"] == "a" * 64
+    assert marker["eventos"] == hook_resource()["spec"]["events"]
 
     merge = steps["merge-hook-events"]
     assert merge["type"] == "merge_hooks"
