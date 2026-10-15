@@ -11,6 +11,7 @@ from app.middleware.team_auth import AuthMiddleware
 from app.services.store_recipes import (
     InstallRecipeService,
     InstallRecipeValidationError,
+    RegistryResourceNotFound,
 )
 
 _PATH = Path(__file__).resolve().parents[1] / "app" / "routers" / "store.py"
@@ -20,6 +21,7 @@ sys.modules[_spec.name] = _store_router
 _spec.loader.exec_module(_store_router)
 store_router = _store_router.router
 get_install_recipe_service = _store_router.get_install_recipe_service
+MAX_UPDATE_PACKAGES = _store_router.MAX_UPDATE_PACKAGES
 
 
 class FakeRegistryClient:
@@ -349,3 +351,61 @@ async def test_install_recipe_endpoint_without_auth_is_denied(app):
         )
 
     assert response.status_code == 401
+
+
+class FakeUpdatesService(FakeRecipeService):
+    async def build(self, **kwargs):
+        if kwargs["name"] == "ausente":
+            raise RegistryResourceNotFound()
+        if kwargs["name"] == "invalido":
+            raise InstallRecipeValidationError("nome inválido")
+        recipe = await super().build(**kwargs)
+        recipe["source"] = {"type": "registry_artifact", "artifact_digest": "a" * 64}
+        return recipe
+
+
+@pytest.mark.asyncio
+async def test_updates_endpoint_answers_every_package_in_one_call(app):
+    app.dependency_overrides[get_install_recipe_service] = lambda: FakeUpdatesService()
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+        headers={"X-API-Key": "team-token"},
+    ) as client:
+        response = await client.post(
+            "/api/v1/store/updates",
+            json={"packages": [
+                {"kind": "hook", "name": "recall"},
+                {"kind": "skill", "name": "ausente", "tag": "v2"},
+                {"kind": "skill", "name": "invalido"},
+            ]},
+        )
+
+    assert response.status_code == 200
+    recall, ausente, invalido = response.json()["packages"]
+    assert recall["found"] is True
+    assert recall["recipe"]["target"] == "claude"
+    assert recall["recipe"]["source"]["artifact_digest"] == "a" * 64
+    assert ausente == {"kind": "skill", "name": "ausente", "tag": "v2", "found": False}
+    assert invalido["found"] is False and invalido["error"] == "nome inválido"
+
+
+@pytest.mark.asyncio
+async def test_updates_endpoint_limits_batch_size_and_kinds(app):
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+        headers={"X-API-Key": "team-token"},
+    ) as client:
+        grande = await client.post(
+            "/api/v1/store/updates",
+            json={"packages": [{"kind": "skill", "name": f"s{i}"} for i in range(MAX_UPDATE_PACKAGES + 1)]},
+        )
+        plugin = await client.post(
+            "/api/v1/store/updates",
+            json={"packages": [{"kind": "plugin", "name": "p"}]},
+        )
+
+    assert grande.status_code == 422
+    assert plugin.status_code == 422
+

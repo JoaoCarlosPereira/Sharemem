@@ -15,6 +15,7 @@ from app.services.store_recipes import (
     SKILL_ARTIFACT_MEDIA_TYPE,
     STORE_API_PREFIX,
     InstallRecipeService,
+    RegistryResourceNotFound,
     StoreRecipeError,
 )
 from app.services.hook_packages import HookPackageInput
@@ -34,6 +35,22 @@ class InstallRecipeRequest(BaseModel):
     name: str = Field(min_length=1, max_length=128)
     tag: str = Field(min_length=1, max_length=128)
     target: Literal["cursor", "claude", "codex"]
+
+
+# Teto de pacotes por consulta do atualizador-store: cobre com folga as pastas
+# de hooks e skills de uma estação sem virar varredura do catálogo.
+MAX_UPDATE_PACKAGES = 300
+
+
+class PackageUpdateItem(BaseModel):
+    kind: Literal["skill", "hook"]
+    name: str = Field(min_length=1, max_length=128)
+    tag: str = Field(default="latest", min_length=1, max_length=128)
+
+
+class PackageUpdatesRequest(BaseModel):
+    target: Literal["claude"] = "claude"
+    packages: list[PackageUpdateItem] = Field(max_length=MAX_UPDATE_PACKAGES)
 
 
 def get_install_recipe_service() -> InstallRecipeService:
@@ -671,3 +688,39 @@ async def build_install_recipe(
         )
     except StoreRecipeError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+
+
+@router.post("/updates")
+async def check_package_updates(
+    payload: PackageUpdatesRequest,
+    request: Request,
+    service: InstallRecipeService = Depends(get_install_recipe_service),
+) -> dict:
+    """Receita atual de vários pacotes numa chamada só, para o atualizador-store.
+
+    Uma consulta por pacote estoura o burst do rate limit (10 em 10 s) numa
+    estação com dezenas de skills; aqui as consultas ao registry ficam do lado
+    do servidor. Pacote que não existe na Store volta com ``found: false``.
+    """
+    actor_id = _current_actor_id()
+    auth_headers = _registry_auth_headers(request)
+    results = []
+    for item in payload.packages:
+        entry: dict = {"kind": item.kind, "name": item.name, "tag": item.tag}
+        try:
+            recipe = await service.build(
+                kind=item.kind,
+                name=item.name,
+                tag=item.tag,
+                target=payload.target,
+                user_id=actor_id,
+                auth_headers=auth_headers,
+            )
+        except RegistryResourceNotFound:
+            results.append({**entry, "found": False})
+            continue
+        except StoreRecipeError as exc:
+            results.append({**entry, "found": False, "error": exc.detail})
+            continue
+        results.append({**entry, "found": True, "recipe": recipe})
+    return {"packages": results}
