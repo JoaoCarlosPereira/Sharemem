@@ -18,8 +18,10 @@ dominate ordering. List/count endpoints remain project-scoped.
 Reads reuse the same vector-store path as ``app.mcp_server.search_memory``.
 Writes call ``memory_client.add`` directly (not the async write queue) so the
 hook-supplied ``metadata`` — ``type``, ``file``, etc. — is preserved, which the
-typed hook searches depend on. The token in ``Authorization: Token <x>`` is
-accepted and ignored (the local server is trust-on-LAN; auth is out of scope).
+typed hook searches depend on. An agent token (``Authorization: Bearer omtk_...``)
+resolved by the auth middleware wins over the ``user_id`` in the body: reads and
+writes are attributed to the machine bound to the token's person, the same rule
+the MCP path applies. Without one, ``user_id`` stays the attribution (trust-on-LAN).
 """
 
 import logging
@@ -28,6 +30,7 @@ from typing import Any, Optional
 from app.utils.attribution import author_hostname_from_payload
 from app.utils.groups import ensure_user_registered, requester_group_for_mcp
 from app.utils.identity import resolve_hostname
+from app.utils.logging_context import auth_method_var, machine_var
 from app.utils.write_guard import check_write_allowed
 from app.utils.memory import get_memory_client
 from app.utils.partitioning import bind_active_collection
@@ -51,6 +54,18 @@ def _memory_client():
     except Exception as e:  # noqa: BLE001
         logging.warning("compat_v3: memory client unavailable: %s", e)
         return None
+
+
+def _token_bound_host(fallback: Optional[str]) -> Optional[str]:
+    """Máquina vinculada ao token de agente vence o ``user_id`` do corpo.
+
+    Paridade com ``mcp_server._effective_mcp_uid``: sem token de agente, o
+    hostname informado pelo hook continua sendo a atribuição.
+    """
+    bound = (machine_var.get() or "").strip()
+    if auth_method_var.get() == "agent_token" and bound:
+        return bound
+    return fallback
 
 
 def _reader_audit_attrs(
@@ -173,7 +188,9 @@ def search(request: SearchRequest, http_request: Request) -> dict:
     preferred_project = None if is_global else project
 
     # Grupo do solicitante: user_id nos filters (plugin) ou header legado → users.group_id.
-    reader_host = requester_hostname or http_request.headers.get("x-openmemory-host")
+    reader_host = _token_bound_host(
+        requester_hostname or http_request.headers.get("x-openmemory-host")
+    )
     requester_group = requester_group_for_mcp(reader_host)
 
     bind_active_collection(client)
@@ -360,15 +377,16 @@ async def add(request: AddRequest) -> dict:
         metadata["project"] = normalize_project(metadata["project"])
     metadata.setdefault("project", project)
     metadata.setdefault("source_app", "openmemory")
-    if request.user_id:
-        metadata.setdefault("hostname", resolve_hostname(request.user_id))
+    author = _token_bound_host(request.user_id)
+    if author:
+        metadata.setdefault("hostname", resolve_hostname(author))
 
-    resolved_host = resolve_hostname(request.user_id) if request.user_id else None
+    resolved_host = resolve_hostname(author) if author else None
     blocked = check_write_allowed(resolved_host)
     if blocked:
         return {"status": "error", "error": blocked.removeprefix("Error: "), "results": []}
 
-    ensure_user_registered(request.user_id)
+    ensure_user_registered(author)
 
     # Writes target the active collection (blue-green, ADR-003).
     bind_active_collection(client)
@@ -376,7 +394,7 @@ async def add(request: AddRequest) -> dict:
     try:
         result = client.add(
             text,
-            user_id=request.user_id or "openmemory",
+            user_id=author or "openmemory",
             project=project,
             metadata=metadata,
             infer=request.infer,
@@ -410,7 +428,9 @@ async def list_memories(request: Request, body: ListRequest) -> dict:
     project, metadata_filters, is_global, requester_hostname = _extract_scope(body.filters)
     vs_filters: dict = {} if is_global else {"project": project} if project else {}
 
-    reader_host = requester_hostname or request.headers.get("x-openmemory-host")
+    reader_host = _token_bound_host(
+        requester_hostname or request.headers.get("x-openmemory-host")
+    )
     requester_group = requester_group_for_mcp(reader_host)
 
     # List scans the active collection with the project filter (ADR-003).
