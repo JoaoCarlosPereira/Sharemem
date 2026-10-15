@@ -391,3 +391,75 @@ class TestFlatHookContract:
 
         assert calls[0]["hostname"] == "S0293"
         assert calls[0]["project"] == "A"
+
+
+class TestAgentTokenAttribution:
+    """Token de agente: a máquina vinculada à pessoa vence o ``user_id`` do corpo.
+
+    O hook ``UserPromptSubmit`` manda ``user_id: hostname()``; numa máquina nova,
+    ainda não vinculada, isso atribuía as leituras à máquina e não à pessoa.
+    """
+
+    @pytest.fixture
+    def agent_token(self):
+        from app.utils.logging_context import auth_method_var, machine_var
+
+        method = auth_method_var.set("agent_token")
+        machine = machine_var.set("S0258")
+        yield
+        machine_var.reset(machine)
+        auth_method_var.reset(method)
+
+    @pytest.mark.asyncio
+    async def test_search_audits_the_token_machine(self, client, monkeypatch, agent_token):
+        calls = []
+        monkeypatch.setattr(compat_v3, "record_memory_reads", lambda **kw: calls.append(kw))
+
+        await client.post(
+            "/v3/memories/search/",
+            json={"query": "alpha", "user_id": "S0360", "project": "A", "limit": 5},
+        )
+
+        assert calls[0]["hostname"] == "S0258"
+
+    @pytest.mark.asyncio
+    async def test_token_also_wins_over_the_filter_tree(self, client, monkeypatch, agent_token):
+        calls = []
+        monkeypatch.setattr(compat_v3, "record_memory_reads", lambda **kw: calls.append(kw))
+
+        await client.post(
+            "/v3/memories/?page=1&page_size=10",
+            json={"filters": _and({"app_id": "A"}, {"user_id": "S0360"})},
+        )
+
+        assert calls[0]["hostname"] == "S0258"
+
+    @pytest.mark.asyncio
+    async def test_add_attributes_to_the_token_machine(self, client, agent_token):
+        body = {"text": "we use pytest", "user_id": "S0360", "app_id": "A", "infer": False}
+        data = (await client.post("/v3/memories/add/", json=body)).json()
+        assert data["status"] == "ok"
+
+        _, kwargs = client._fake.add_calls[0]
+        assert kwargs["user_id"] == "S0258"
+        assert kwargs["metadata"]["hostname"] == "S0258"
+
+    @pytest.mark.asyncio
+    async def test_without_token_body_user_id_is_kept(self, client, monkeypatch):
+        from app.utils.logging_context import auth_method_var, machine_var
+
+        method = auth_method_var.set("legacy")
+        machine = machine_var.set("S0258")
+        try:
+            calls = []
+            monkeypatch.setattr(
+                compat_v3, "record_memory_reads", lambda **kw: calls.append(kw)
+            )
+            await client.post(
+                "/v3/memories/search/", json={"query": "alpha", "user_id": "S0360"}
+            )
+        finally:
+            machine_var.reset(machine)
+            auth_method_var.reset(method)
+
+        assert calls[0]["hostname"] == "S0360"
