@@ -78,6 +78,12 @@ export function ContributorFilters({
             Geral
           </ToggleGroupItem>
         </ToggleGroup>
+        {filters.metric === "total" && (
+          <p className="text-xs text-zinc-500">
+            Score de 0 a 100: 70% escritas e 30% consultas, cada uma proporcional ao maior valor
+            do recorte filtrado.
+          </p>
+        )}
       </div>
 
       <div className="grid gap-3 md:grid-cols-3">

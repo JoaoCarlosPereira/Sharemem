@@ -31,6 +31,9 @@ ContributorPeriod = Literal["24h", "7d", "30d", "all"]
 
 PREVIEW_MAX_LEN = 160
 
+CONTRIBUTOR_WRITE_WEIGHT = 0.7
+CONTRIBUTOR_READ_WEIGHT = 0.3
+
 
 def _truncate_preview(text: Optional[str], *, limit: int = PREVIEW_MAX_LEN) -> Optional[str]:
     if not text:
@@ -466,6 +469,14 @@ def recent_user_reads(db: Session, hostname: str, *, limit: int = 20) -> list[di
     return items
 
 
+def contributor_score(writes: int, reads: int, *, max_writes: int, max_reads: int) -> float:
+    """Score 0-100: escritas e leituras normalizadas pelo maior valor do recorte, pesos 70/30."""
+    write_part = writes / max_writes if max_writes > 0 else 0.0
+    read_part = reads / max_reads if max_reads > 0 else 0.0
+    score = CONTRIBUTOR_WRITE_WEIGHT * write_part + CONTRIBUTOR_READ_WEIGHT * read_part
+    return round(score * 100, 2)
+
+
 def top_contributors(
     db: Session,
     *,
@@ -499,6 +510,9 @@ def top_contributors(
     writes = _write_stats_for_hostnames(db, hostnames, since=since, project=project)
     reads = _read_stats_for_hostnames(db, hostnames, since=since, project=project)
 
+    max_writes = max((writes.get(host, {}).get("total", 0) for host in hostnames), default=0)
+    max_reads = max((reads.get(host, {}).get("total", 0) for host in hostnames), default=0)
+
     ranked: list[dict] = []
     for hostname in hostnames:
         write_count = writes.get(hostname, {}).get("total", 0)
@@ -508,7 +522,9 @@ def top_contributors(
         elif metric == "reads":
             value = read_count
         else:
-            value = write_count + read_count
+            value = contributor_score(
+                write_count, read_count, max_writes=max_writes, max_reads=max_reads
+            )
         if value <= 0:
             continue
         write_projects = writes.get(hostname, {}).get("projects", 0)

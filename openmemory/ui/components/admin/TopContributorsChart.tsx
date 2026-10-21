@@ -15,20 +15,23 @@ const AVATAR_SIZE = 28;
 
 const METRIC_CONFIG: Record<
   ContributorMetric,
-  { label: string; color: string; accent: string }
+  { label: string; description: string; color: string; accent: string }
 > = {
   writes: {
     label: "Escritas",
+    description: "Ranking por escritas no período selecionado",
     color: "hsl(152 76% 45%)",
     accent: "text-emerald-300",
   },
   reads: {
     label: "Consultas",
+    description: "Ranking por consultas no período selecionado",
     color: "hsl(189 94% 43%)",
     accent: "text-cyan-300",
   },
   total: {
-    label: "Contribuições",
+    label: "Score",
+    description: "Score de 0 a 100 no período selecionado: 70% escritas e 30% consultas",
     color: "hsl(258 90% 66%)",
     accent: "text-violet-300",
   },
@@ -132,7 +135,7 @@ export function TopContributorsChart({
         <div>
           <h2 className="text-lg font-semibold text-white">Top 10 contribuidores</h2>
           <p className="text-sm text-zinc-500">
-            Ranking por {metricConfig.label.toLowerCase()} no período selecionado
+            {metricConfig.description}
           </p>
         </div>
         <span className={`text-sm font-medium ${metricConfig.accent}`}>

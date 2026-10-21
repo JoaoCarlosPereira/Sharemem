@@ -94,7 +94,7 @@ class TopContributorItem(BaseModel):
     avatar_url: Optional[str] = None
     group_id: Optional[str] = None
     group_name: Optional[str] = None
-    value: int
+    value: float
     writes: int
     reads: int
     distinct_projects: int = 0

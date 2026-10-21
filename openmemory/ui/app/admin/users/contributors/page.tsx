@@ -71,15 +71,19 @@ export default function TopContributorsPage() {
 
   const stats = useMemo(() => {
     const items = data?.items ?? [];
-    const topValue = items[0]?.value ?? 0;
-    const totalTop10 = items.reduce((sum, item) => sum + item.value, 0);
+    const isScore = filters.metric === "total";
+    const topValue = isScore ? (items[0]?.value ?? 0).toFixed(1) : (items[0]?.value ?? 0);
+    const totalTop10 = items.reduce(
+      (sum, item) => sum + (isScore ? item.writes + item.reads : item.value),
+      0,
+    );
     const activeUsers = items.length;
     const distinctProjects = items.reduce(
       (max, item) => Math.max(max, item.distinct_projects),
       0,
     );
     return { topValue, totalTop10, activeUsers, distinctProjects };
-  }, [data]);
+  }, [data, filters.metric]);
 
   return (
     <div className="max-w-[1600px] space-y-6 pb-12">
@@ -125,7 +129,7 @@ export default function TopContributorsPage() {
         loading={loading}
       />
 
-      <ContributorsRankingTable items={data?.items ?? []} />
+      <ContributorsRankingTable items={data?.items ?? []} metric={filters.metric} />
     </div>
   );
 }

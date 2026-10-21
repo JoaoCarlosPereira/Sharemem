@@ -483,9 +483,74 @@ def test_top_contributors_ranks_by_total(factory, client):
     assert items[0]["rank"] == 1
     assert items[0]["writes"] == 3
     assert items[0]["reads"] == 1
-    assert items[0]["value"] == 4
+    assert items[0]["value"] == 100.0
     assert items[1]["user_id"] == "bob-pc"
-    assert items[1]["value"] == 2
+    assert items[1]["value"] == pytest.approx(53.33)
+
+
+def test_contributor_score_weights_writes_70_reads_30():
+    from app.utils.user_analytics import contributor_score
+
+    assert contributor_score(10, 0, max_writes=10, max_reads=50) == 70.0
+    assert contributor_score(0, 50, max_writes=10, max_reads=50) == 30.0
+    assert contributor_score(10, 50, max_writes=10, max_reads=50) == 100.0
+    assert contributor_score(0, 0, max_writes=0, max_reads=0) == 0.0
+
+
+def test_top_contributors_total_prioritizes_writes_over_reads(factory, client):
+    s = factory()
+    try:
+        team = Group(name="Dev")
+        s.add(team)
+        s.flush()
+        s.add_all(
+            [
+                User(user_id="writer-pc", group_id=team.id),
+                User(user_id="reader-pc", group_id=team.id),
+            ]
+        )
+        now = datetime.now(timezone.utc)
+        for _ in range(18):
+            s.add(
+                WriteAuditLog(
+                    project="proj-a",
+                    hostname="writer-pc",
+                    client_name="cursor",
+                    action="enqueue",
+                    created_at=now,
+                )
+            )
+        s.add(
+            WriteAuditLog(
+                project="proj-a",
+                hostname="reader-pc",
+                client_name="cursor",
+                action="enqueue",
+                created_at=now,
+            )
+        )
+        for i, (host, count) in enumerate((("writer-pc", 25), ("reader-pc", 50))):
+            for j in range(count):
+                s.add(
+                    ReadAuditLog(
+                        project="proj-a",
+                        memory_id=f"mem-{i}-{j}",
+                        access_type="search",
+                        source="mcp",
+                        hostname=host,
+                        client_name="cursor",
+                        accessed_at=now,
+                    )
+                )
+        s.commit()
+    finally:
+        s.close()
+
+    r = client.get("/admin/analytics/top-contributors?metric=total&period=all")
+    items = r.json()["items"]
+    assert [item["user_id"] for item in items] == ["writer-pc", "reader-pc"]
+    assert items[0]["value"] == 85.0
+    assert items[1]["value"] == pytest.approx(33.89)
 
 
 def test_top_contributors_metric_writes(factory, client):
