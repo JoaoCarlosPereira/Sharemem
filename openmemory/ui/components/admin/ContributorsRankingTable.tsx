@@ -10,13 +10,16 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import type { TopContributor } from "@/types/admin";
+import type { ContributorMetric, TopContributor } from "@/types/admin";
 
 interface ContributorsRankingTableProps {
   items: TopContributor[];
+  metric: ContributorMetric;
 }
 
-export function ContributorsRankingTable({ items }: ContributorsRankingTableProps) {
+export function ContributorsRankingTable({ items, metric }: ContributorsRankingTableProps) {
+  const isScore = metric === "total";
+
   if (items.length === 0) {
     return null;
   }
@@ -34,7 +37,7 @@ export function ContributorsRankingTable({ items }: ContributorsRankingTableProp
             <TableHead>Grupo</TableHead>
             <TableHead>Escritas</TableHead>
             <TableHead>Consultas</TableHead>
-            <TableHead>Total</TableHead>
+            <TableHead>{isScore ? "Score" : "Total"}</TableHead>
             <TableHead>Projetos</TableHead>
             <TableHead className="text-right">Ações</TableHead>
           </TableRow>
@@ -53,7 +56,9 @@ export function ContributorsRankingTable({ items }: ContributorsRankingTableProp
               <TableCell className="text-zinc-400">{item.group_name ?? "—"}</TableCell>
               <TableCell>{item.writes}</TableCell>
               <TableCell>{item.reads}</TableCell>
-              <TableCell className="font-medium text-zinc-100">{item.value}</TableCell>
+              <TableCell className="font-medium text-zinc-100">
+                {isScore ? item.value.toFixed(1) : item.value}
+              </TableCell>
               <TableCell>{item.distinct_projects}</TableCell>
               <TableCell className="text-right">
                 {item.group_id ? (
