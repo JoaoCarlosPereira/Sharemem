@@ -94,6 +94,76 @@ async def test_search_catalog_accepts_empty_query_and_honors_limit(monkeypatch):
     assert fake.calls[0][1]["limit"] == 1
 
 
+def _script_resource(name="gcenfe02-xml"):
+    return {
+        "apiVersion": "ar.dev/v1alpha1",
+        "kind": "Script",
+        "metadata": {
+            "namespace": "default",
+            "name": name,
+            "tag": "latest",
+            "annotations": {"sharemem.io/autor": "pessoa-1", "sharemem.io/versao": "3"},
+        },
+        "spec": {
+            "description": "Decodifica a coluna GCENFE02.XML",
+            "usage": "python gcenfe02_xml.py <arquivo>",
+            "fileName": "gcenfe02_xml.py",
+            "language": "python",
+            "effects": ["somente-leitura"],
+            "area": "sysmo-s1",
+            "tags": ["nfe"],
+            "content": "print(1)\n",
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_scr08_search_without_kind_also_lists_scripts(monkeypatch):
+    fake = FakeCatalogClient()
+    monkeypatch.setattr(mcp_server, "get_agent_registry_client", lambda: fake)
+
+    await mcp_server.search_catalog(query="nada-casa-isto")
+
+    listed = [call[1]["kind"] for call in fake.calls]
+    assert "script" in listed
+    script_call = next(call[1] for call in fake.calls if call[1]["kind"] == "script")
+    assert script_call["latest_only"] is True
+    skill_call = next(call[1] for call in fake.calls if call[1]["kind"] == "skill")
+    assert skill_call["latest_only"] is False
+
+
+@pytest.mark.asyncio
+async def test_scr07_search_script_kind_returns_card_with_latest_only(monkeypatch):
+    fake = FakeCatalogClient()
+    fake.items = [_script_resource()]
+    monkeypatch.setattr(mcp_server, "get_agent_registry_client", lambda: fake)
+
+    out = await mcp_server.search_catalog(query="XML GCENFE02", kind="script")
+
+    assert fake.calls[0][1]["latest_only"] is True
+    result = json.loads(out)["results"][0]
+    assert result["name"] == "gcenfe02-xml"
+    assert result["language"] == "python"
+    assert result["effects"] == ["somente-leitura"]
+    assert result["area"] == "sysmo-s1"
+    assert result["tags"] == ["nfe"]
+    assert result["author"] == "pessoa-1"
+    assert result["version"] == "3"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("requested,sent", [(500, 100), (None, 20)])
+async def test_scr09_search_limit_is_clamped(monkeypatch, requested, sent):
+    fake = FakeCatalogClient()
+    monkeypatch.setattr(mcp_server, "get_agent_registry_client", lambda: fake)
+    kwargs = {"limit": requested} if requested is not None else {}
+
+    out = await mcp_server.search_catalog(query="", kind="script", **kwargs)
+
+    assert fake.calls[0][1]["limit"] == sent
+    assert json.loads(out)["limit"] == sent
+
+
 @pytest.mark.asyncio
 async def test_get_catalog_resource_returns_error_on_missing_resource(monkeypatch):
     fake = FakeCatalogClient()

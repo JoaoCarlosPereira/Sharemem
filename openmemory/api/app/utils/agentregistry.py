@@ -27,6 +27,7 @@ KIND_TO_REGISTRY_COLLECTION: dict[str, str] = {
     "mcpserver": "mcpservers",
     "plugin": "plugins",
     "prompt": "prompts",
+    "script": "scripts",
     "skill": "skills",
 }
 
@@ -36,6 +37,7 @@ REGISTRY_KIND_TO_CATALOG_KIND: dict[str, str] = {
     "MCPServer": "mcpserver",
     "Plugin": "plugin",
     "Prompt": "prompt",
+    "Script": "script",
     "Skill": "skill",
 }
 
@@ -90,6 +92,7 @@ class AgentRegistryHttpClient:
         namespace: str = "default",
         limit: int = DEFAULT_SEARCH_LIMIT,
         cursor: Optional[str] = None,
+        latest_only: bool = False,
         auth_headers: Optional[dict[str, str]] = None,
     ) -> dict[str, Any]:
         safe_kind = validate_catalog_kind(kind)
@@ -98,6 +101,8 @@ class AgentRegistryHttpClient:
         params: dict[str, Any] = {"namespace": namespace or "default", "limit": safe_limit}
         if cursor:
             params["cursor"] = cursor
+        if latest_only:
+            params["latestOnly"] = "true"
         response = await self._request(
             "GET",
             f"/v0/{collection}",
@@ -125,6 +130,24 @@ class AgentRegistryHttpClient:
         return await self._request(
             "GET",
             path,
+            params={"namespace": namespace or "default"},
+            auth_headers=auth_headers,
+        )
+
+    async def list_tags(
+        self,
+        *,
+        kind: str,
+        name: str,
+        namespace: str = "default",
+        auth_headers: Optional[dict[str, str]] = None,
+    ) -> dict[str, Any]:
+        safe_kind = validate_catalog_kind(kind)
+        safe_name = validate_path_segment(name, "name")
+        collection = KIND_TO_REGISTRY_COLLECTION[safe_kind]
+        return await self._request(
+            "GET",
+            f"/v0/{collection}/{quote(safe_name, safe='')}/tags",
             params={"namespace": namespace or "default"},
             auth_headers=auth_headers,
         )
@@ -421,7 +444,8 @@ def summarize_resource(resource: dict[str, Any]) -> dict[str, Any]:
     metadata = resource.get("metadata") if isinstance(resource.get("metadata"), dict) else {}
     spec = resource.get("spec") if isinstance(resource.get("spec"), dict) else {}
     kind = REGISTRY_KIND_TO_CATALOG_KIND.get(str(resource.get("kind") or ""), str(resource.get("kind") or "").lower())
-    return {
+    annotations = metadata.get("annotations") or {}
+    summary = {
         "kind": kind,
         "registry_kind": resource.get("kind"),
         "namespace": metadata.get("namespace") or "default",
@@ -430,13 +454,23 @@ def summarize_resource(resource: dict[str, Any]) -> dict[str, Any]:
         "title": spec.get("title") or metadata.get("name"),
         "description": spec.get("description"),
         "labels": metadata.get("labels") or {},
-        "annotations": metadata.get("annotations") or {},
+        "annotations": annotations,
     }
+    if kind == "script":
+        summary.update(
+            language=spec.get("language"),
+            effects=spec.get("effects") or [],
+            area=spec.get("area"),
+            tags=spec.get("tags") or [],
+            author=annotations.get("sharemem.io/autor"),
+            version=annotations.get("sharemem.io/versao"),
+        )
+    return summary
 
 
 def resource_matches_query(resource: dict[str, Any], query: str) -> bool:
-    needle = (query or "").strip().lower()
-    if not needle:
+    terms = (query or "").lower().split()
+    if not terms:
         return True
     summary = summarize_resource(resource)
     haystack = " ".join(
@@ -450,10 +484,12 @@ def resource_matches_query(resource: dict[str, Any], query: str) -> bool:
             summary.get("description"),
             summary.get("labels"),
             summary.get("annotations"),
+            summary.get("area"),
+            summary.get("tags"),
         )
         if value
     ).lower()
-    return needle in haystack
+    return all(term in haystack for term in terms)
 
 
 def _json_response(response: httpx.Response) -> dict[str, Any]:

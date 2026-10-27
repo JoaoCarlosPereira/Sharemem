@@ -1365,6 +1365,7 @@ async def search_catalog(
                 kind=catalog_kind,
                 namespace=namespace,
                 limit=safe_limit,
+                latest_only=catalog_kind == "script",
                 auth_headers=_registry_auth_headers_for_mcp(),
             )
             items = payload.get("items")
