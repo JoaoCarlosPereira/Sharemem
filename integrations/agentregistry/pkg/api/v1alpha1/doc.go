@@ -30,6 +30,7 @@ const (
 	KindPlugin     = "Plugin"
 	KindHook       = "Hook"
 	KindPrompt     = "Prompt"
+	KindScript     = "Script"
 	KindDeployment = "Deployment"
 	KindRuntime    = "Runtime"
 	KindModel      = "Model"
