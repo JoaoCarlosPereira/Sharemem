@@ -8,6 +8,8 @@ from app.services.script_packages import (
     content_sha256,
     effect_warning,
     find_credential_line,
+    is_same_publication,
+    next_version,
     to_registry_resource,
 )
 
@@ -224,3 +226,28 @@ def test_to_registry_resource_keeps_required_content_key_even_when_empty():
     script = ScriptInput(**_payload(content=""))
 
     assert to_registry_resource(script, "1", {})["spec"]["content"] == ""
+
+
+@pytest.mark.parametrize(
+    "tags,expected",
+    [([], "1"), (["latest"], "1"), (["1", "latest", "9", "2"], "10")],
+)
+def test_scr15_next_version_is_highest_numeric_tag_plus_one(tags, expected):
+    assert next_version(tags) == expected
+
+
+def test_scr16_same_publication_ignores_empty_optional_fields_from_registry():
+    script = ScriptInput(**_payload(title=None, requirements=[], tags=[]))
+    published = {**to_registry_resource(script, "1", {})["spec"], "title": "", "requirements": None}
+
+    assert is_same_publication(script, published, content_sha256(script.content)) is True
+
+
+def test_scr16_different_card_or_sha_is_not_same_publication():
+    script = ScriptInput(**_payload())
+    spec = to_registry_resource(script, "1", {})["spec"]
+    sha = content_sha256(script.content)
+
+    assert is_same_publication(script, {**spec, "usage": "outro uso"}, sha) is False
+    assert is_same_publication(script, spec, "0" * 64) is False
+    assert is_same_publication(script, spec, None) is False

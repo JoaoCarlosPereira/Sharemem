@@ -16,6 +16,17 @@ MAX_CONTENT_BYTES = 256 * 1024
 MAX_DESCRIPTION_CHARS = 4000
 NAME_PATTERN = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
 NAME_LENGTH = range(2, 65)
+CARD_KEYS = (
+    "title",
+    "description",
+    "usage",
+    "fileName",
+    "language",
+    "requirements",
+    "effects",
+    "area",
+    "tags",
+)
 
 _REFERENCE_START = r"\"'$%{"
 CREDENTIAL_PATTERNS = (
@@ -108,6 +119,21 @@ def effect_warning(effects: list[str]) -> str | None:
 
 def content_sha256(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
+def next_version(tags: list[str]) -> str:
+    return str(max((int(tag) for tag in tags if tag.isdigit()), default=0) + 1)
+
+
+def is_same_publication(script: ScriptInput, published_spec: dict, published_sha256: str | None) -> bool:
+    if published_sha256 != content_sha256(script.content):
+        return False
+    new_spec = to_registry_resource(script, "", {})["spec"]
+    return _comparable_card(published_spec) == _comparable_card(new_spec)
+
+
+def _comparable_card(spec: dict) -> dict:
+    return {key: spec.get(key) or None for key in CARD_KEYS}
 
 
 def to_registry_resource(script: ScriptInput, tag: str, annotations: dict[str, str]) -> dict:
