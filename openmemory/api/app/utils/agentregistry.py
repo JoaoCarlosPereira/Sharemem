@@ -62,6 +62,12 @@ class AgentRegistryValidationError(AgentRegistryError):
         super().__init__(400, detail)
 
 
+class AgentRegistryRateLimited(AgentRegistryError):
+    def __init__(self, retry_after: Optional[str]):
+        self.retry_after = retry_after
+        super().__init__(429, "AgentRegistry limitou as requisições")
+
+
 class AgentRegistryResourceNotFound(AgentRegistryError):
     def __init__(self, detail: str = "recurso não encontrado no AgentRegistry"):
         super().__init__(404, detail)
@@ -497,6 +503,8 @@ def _json_response(response: httpx.Response) -> dict[str, Any]:
         raise AgentRegistryResourceNotFound()
     if response.status_code in (401, 403):
         raise AgentRegistryError(response.status_code, "AgentRegistry negou acesso ao recurso")
+    if response.status_code == 429:
+        raise AgentRegistryRateLimited(response.headers.get("Retry-After"))
     if response.status_code >= 400:
         raise AgentRegistryError(502, f"AgentRegistry retornou HTTP {response.status_code}")
     try:

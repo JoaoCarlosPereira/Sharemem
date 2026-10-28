@@ -1339,7 +1339,7 @@ def _current_mcp_actor_id() -> str:
     return hostname or "mcp"
 
 
-@mcp.tool(description="Search the internal ShareMem catalog across skills, hooks, MCP servers, prompts, agents and plugins via AgentRegistry. Safe read-only operation. `query` may be empty to list recent resources; `kind` optionally narrows to skill|hook|mcpserver|prompt|agent|plugin. Returns JSON results with summaries and raw resources.")
+@mcp.tool(description="Search the internal ShareMem catalog across skills, hooks, MCP servers, prompts, agents, plugins and scripts via AgentRegistry. Safe read-only operation. `query` may be empty to list recent resources; `kind` optionally narrows to skill|hook|mcpserver|prompt|agent|plugin|script. Returns JSON results with summaries and raw resources.")
 async def search_catalog(
     query: str = "",
     kind: str | None = None,
@@ -1616,6 +1616,74 @@ async def delete_skill_package(
     except Exception as e:  # noqa: BLE001
         logging.exception(e)
         return f"Error: {e}"
+
+
+async def _run_script_catalog(action) -> str:
+    from app.services.script_catalog import ScriptCatalog
+    from app.services.script_packages import ScriptRuleError
+
+    try:
+        with SessionLocal() as db:
+            catalog = ScriptCatalog(get_agent_registry_client(), db, _registry_auth_headers_for_mcp())
+            result = await action(catalog)
+        return result.model_dump_json()
+    except ScriptRuleError as e:
+        return f"Error: {e}"
+    except Exception as e:  # noqa: BLE001
+        logging.exception(e)
+        return f"Error: {e}"
+
+
+@mcp.tool(description="Publica um Script (arquivo único .py/.sql/.ps1/.sh/.bat/.cmd/.js/.mjs) com a ficha na Store; conteúdo novo vira nova versão. Exige confirm_user_requested=true.")
+async def publish_script(
+    name: str,
+    file_name: str,
+    description: str,
+    usage: str,
+    language: str,
+    effects: list[str],
+    area: str,
+    content: str,
+    title: str | None = None,
+    requirements: list[str] | None = None,
+    tags: list[str] | None = None,
+    confirm_user_requested: bool = False,
+) -> str:
+    from app.services.script_packages import ScriptInput, ScriptRuleError
+
+    if not confirm_user_requested:
+        return "Error: publish_script exige pedido explícito do desenvolvedor (confirm_user_requested=true)"
+    try:
+        script = ScriptInput(
+            name=name,
+            file_name=file_name,
+            title=title,
+            description=description,
+            usage=usage,
+            language=language,
+            requirements=requirements or [],
+            effects=effects,
+            area=area,
+            tags=tags or [],
+            content=content,
+        )
+    except (ScriptRuleError, ValueError) as e:
+        return f"Error: {e}"
+    return await _run_script_catalog(lambda catalog: catalog.publish(script, _current_mcp_actor_id()))
+
+
+@mcp.tool(description="Baixa um Script da Store pelo nome (latest ou versão fixa) com conteúdo, sha256, ficha, aviso de efeito e versões.")
+async def get_script(name: str, version: str | None = None) -> str:
+    return await _run_script_catalog(lambda catalog: catalog.get(name, version))
+
+
+@mcp.tool(description="Volta a latest de um Script para uma versão anterior sem apagar as mais novas. Exige confirm_user_requested=true.")
+async def rollback_script(name: str, version: str, confirm_user_requested: bool = False) -> str:
+    if not confirm_user_requested:
+        return "Error: rollback_script exige pedido explícito do desenvolvedor (confirm_user_requested=true)"
+    return await _run_script_catalog(
+        lambda catalog: catalog.rollback(name, version, _current_mcp_actor_id())
+    )
 
 
 @mcp.tool(description="Build a host-applied install recipe for a catalog resource using ShareMem InstallRecipeService. This does not write files itself, but it starts an install workflow; only call after an explicit developer request to install and pass confirm_user_requested=true.")

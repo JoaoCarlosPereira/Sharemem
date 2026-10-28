@@ -164,6 +164,179 @@ async def test_scr09_search_limit_is_clamped(monkeypatch, requested, sent):
     assert json.loads(out)["limit"] == sent
 
 
+def test_scr07_search_catalog_description_mentions_script():
+    description = mcp_server.mcp._tool_manager.get_tool("search_catalog").description
+    assert "script" in description
+
+
+def _script_view(version="2", content="print(2)\n"):
+    from app.services.script_catalog import ScriptCard, ScriptVersion, ScriptView
+
+    return ScriptView(
+        name="gcenfe02-xml",
+        version=version,
+        is_latest=True,
+        file_name="gcenfe02_xml.py",
+        content=content,
+        sha256="abc",
+        warning=None,
+        card=ScriptCard(
+            title=None,
+            description="Decodifica a coluna GCENFE02.XML",
+            usage="python gcenfe02_xml.py <arquivo>",
+            language="python",
+            requirements=[],
+            effects=["somente-leitura"],
+            area="sysmo-s1",
+            tags=[],
+            author="pessoa-1",
+            published_at="2026-10-27T00:00:00+00:00",
+        ),
+        versions=[ScriptVersion(version=version, author="pessoa-1", published_at=None, is_latest=True)],
+    )
+
+
+class FakeScriptCatalog:
+    instances = []
+
+    def __init__(self, client, db, auth_headers):
+        self.client = client
+        self.db = db
+        self.auth_headers = auth_headers
+        self.calls = []
+        FakeScriptCatalog.instances.append(self)
+
+    async def publish(self, script, author):
+        from app.services.script_catalog import PublishResult
+
+        self.calls.append(("publish", script, author))
+        return PublishResult(name=script.name, version="1", sha256="abc", created=True)
+
+    async def get(self, name, version=None):
+        self.calls.append(("get", name, version))
+        return _script_view(version or "2")
+
+    async def rollback(self, name, version, author):
+        self.calls.append(("rollback", name, version, author))
+        return _script_view(version, "print(1)\n")
+
+
+@pytest.fixture
+def script_catalog(monkeypatch):
+    from app.services import script_catalog as catalog_module
+
+    FakeScriptCatalog.instances = []
+    fake_client = FakeCatalogClient()
+    monkeypatch.setattr(catalog_module, "ScriptCatalog", FakeScriptCatalog)
+    monkeypatch.setattr(mcp_server, "get_agent_registry_client", lambda: fake_client)
+    token_auth = mcp_server.registry_auth_headers_var.set({"Authorization": "Bearer omtk_token"})
+    token_user = mcp_server.auth_user_var.set("person-1")
+    yield FakeScriptCatalog
+    mcp_server.auth_user_var.reset(token_user)
+    mcp_server.registry_auth_headers_var.reset(token_auth)
+
+
+def _publish_args(**overrides):
+    args = {
+        "name": "gcenfe02-xml",
+        "file_name": "gcenfe02_xml.py",
+        "description": "Decodifica a coluna GCENFE02.XML",
+        "usage": "python gcenfe02_xml.py <arquivo>",
+        "language": "python",
+        "effects": ["somente-leitura"],
+        "area": "sysmo-s1",
+        "content": "print(1)\n",
+        "confirm_user_requested": True,
+    }
+    args.update(overrides)
+    return args
+
+
+@pytest.mark.asyncio
+async def test_scr01_publish_script_without_confirmation_does_not_call_service(script_catalog):
+    out = await mcp_server.publish_script(**_publish_args(confirm_user_requested=False))
+
+    assert out.startswith("Error: ")
+    assert "confirm_user_requested=true" in out
+    assert script_catalog.instances == []
+
+
+@pytest.mark.asyncio
+async def test_scr01_publish_script_returns_version_and_sha_with_mcp_actor(script_catalog):
+    out = await mcp_server.publish_script(**_publish_args(tags=["nfe"]))
+
+    assert json.loads(out) == {"name": "gcenfe02-xml", "version": "1", "sha256": "abc", "created": True}
+    service = script_catalog.instances[0]
+    _, script, author = service.calls[0]
+    assert author == "person-1"
+    assert script.name == "gcenfe02-xml"
+    assert script.tags == ["nfe"]
+    assert script.requirements == []
+    assert service.auth_headers == {"Authorization": "Bearer omtk_token"}
+
+
+@pytest.mark.asyncio
+async def test_publish_script_rule_error_becomes_error_message(script_catalog):
+    out = await mcp_server.publish_script(**_publish_args(name="A"))
+
+    assert out == "Error: Nome inválido"
+    assert script_catalog.instances == []
+
+
+@pytest.mark.asyncio
+async def test_scr10_get_script_returns_script_view_json(script_catalog):
+    out = await mcp_server.get_script(name="gcenfe02-xml")
+
+    assert json.loads(out) == _script_view().model_dump()
+    assert script_catalog.instances[0].calls == [("get", "gcenfe02-xml", None)]
+
+
+@pytest.mark.asyncio
+async def test_get_script_translated_error_becomes_error_message(script_catalog, monkeypatch):
+    from app.services.script_packages import ScriptRuleError
+
+    async def missing(self, name, version=None):
+        raise ScriptRuleError("Script não encontrado: nao-existe@9")
+
+    monkeypatch.setattr(FakeScriptCatalog, "get", missing)
+
+    out = await mcp_server.get_script(name="nao-existe", version="9")
+
+    assert out == "Error: Script não encontrado: nao-existe@9"
+
+
+@pytest.mark.asyncio
+async def test_get_script_unexpected_error_is_logged_and_returned(script_catalog, monkeypatch, caplog):
+    async def broken(self, name, version=None):
+        raise RuntimeError("falha inesperada")
+
+    monkeypatch.setattr(FakeScriptCatalog, "get", broken)
+
+    out = await mcp_server.get_script(name="gcenfe02-xml")
+
+    assert out == "Error: falha inesperada"
+    assert any(record.levelname == "ERROR" for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_scr29_rollback_script_requires_confirmation(script_catalog):
+    out = await mcp_server.rollback_script(name="gcenfe02-xml", version="1")
+
+    assert out.startswith("Error: ")
+    assert "confirm_user_requested=true" in out
+    assert script_catalog.instances == []
+
+
+@pytest.mark.asyncio
+async def test_scr29_rollback_script_returns_new_latest(script_catalog):
+    out = await mcp_server.rollback_script(
+        name="gcenfe02-xml", version="1", confirm_user_requested=True
+    )
+
+    assert json.loads(out) == _script_view("1", "print(1)\n").model_dump()
+    assert script_catalog.instances[0].calls == [("rollback", "gcenfe02-xml", "1", "person-1")]
+
+
 @pytest.mark.asyncio
 async def test_get_catalog_resource_returns_error_on_missing_resource(monkeypatch):
     fake = FakeCatalogClient()

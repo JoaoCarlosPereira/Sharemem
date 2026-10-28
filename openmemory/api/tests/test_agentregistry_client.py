@@ -1,9 +1,12 @@
+import httpx
 import pytest
 
 from app.utils.agentregistry import (
     KIND_TO_REGISTRY_COLLECTION,
     REGISTRY_KIND_TO_CATALOG_KIND,
     AgentRegistryHttpClient,
+    AgentRegistryRateLimited,
+    _json_response,
     resource_matches_query,
     summarize_resource,
 )
@@ -101,6 +104,16 @@ def test_scr07_phrase_that_matched_before_still_matches():
 
 def test_scr07_query_with_a_missing_term_does_not_match():
     assert resource_matches_query(_script_resource(), "gcenfe02 boleto") is False
+
+
+def test_scr26_http_429_keeps_status_and_retry_after():
+    response = httpx.Response(429, headers={"Retry-After": "7"})
+
+    with pytest.raises(AgentRegistryRateLimited) as exc:
+        _json_response(response)
+
+    assert exc.value.status_code == 429
+    assert exc.value.retry_after == "7"
 
 
 def test_scr07_terms_also_match_script_area_and_tags():
