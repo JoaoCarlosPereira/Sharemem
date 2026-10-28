@@ -6,9 +6,11 @@ from typing import Any
 
 import anyio
 from pydantic import BaseModel
-from sqlalchemy import text
+from sqlalchemy import func, select, text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from app.models import ScriptDownload, get_current_utc_time
 from app.services.script_packages import (
     ScriptInput,
     ScriptRuleError,
@@ -26,6 +28,9 @@ VERSION_KEY = "sharemem.io/versao"
 AUTHOR_KEY = "sharemem.io/autor"
 PUBLISHED_KEY = "sharemem.io/publicado-em"
 SHA256_KEY = "sharemem.io/sha256"
+OBSOLETE_KEY = "sharemem.io/obsoleto"
+OBSOLETE_WARNING = "Script obsoleto"
+DOWNLOAD_WINDOW = datetime.timedelta(days=30)
 
 
 class PublishResult(BaseModel):
@@ -53,6 +58,7 @@ class ScriptCard(BaseModel):
     tags: list[str]
     author: str | None
     published_at: str | None
+    downloads_30d: int | None = None
 
 
 class ScriptView(BaseModel):
@@ -93,27 +99,65 @@ class ScriptCatalog:
         )
         return result
 
-    async def get(self, name: str, version: str | None = None) -> ScriptView:
+    async def get(
+        self, name: str, version: str | None = None, hostname: str | None = None
+    ) -> ScriptView:
         tag = version or LATEST_TAG
         try:
             resource = await self._get_tag(name, tag)
             items = await self._tag_items(name)
         except AgentRegistryError as error:
             raise _translate_registry_error(error, name, tag) from error
-        return _build_view(resource, items)
+        view = _build_view(resource, items)
+        if hostname:
+            self._record_download(name, view.version or tag, hostname)
+        view.card.downloads_30d = self._count_downloads(name)
+        return view
+
+    def _record_download(self, name: str, version: str, hostname: str) -> None:
+        try:
+            self.db.add(ScriptDownload(name=name, version=version, hostname=hostname))
+            self.db.commit()
+        except SQLAlchemyError:
+            self.db.rollback()
+            logging.exception(f"script_download name={name} version={version} hostname={hostname}")
+
+    def _count_downloads(self, name: str) -> int | None:
+        since = get_current_utc_time() - DOWNLOAD_WINDOW
+        try:
+            return self.db.scalar(
+                select(func.count())
+                .select_from(ScriptDownload)
+                .where(ScriptDownload.name == name, ScriptDownload.downloaded_at >= since)
+            )
+        except SQLAlchemyError:
+            self.db.rollback()
+            logging.exception(f"script_download_count name={name}")
+            return None
 
     async def rollback(self, name: str, version: str, author: str) -> ScriptView:
+        view = await self._replace_latest(name, version, author, {VERSION_KEY: version})
+        logging.info(f"script_rollback name={name} version={version} author={author}")
+        return view
+
+    async def retire(self, name: str, author: str) -> ScriptView:
+        view = await self._replace_latest(name, LATEST_TAG, author, {OBSOLETE_KEY: "true"})
+        logging.info(f"script_retire name={name} author={author}")
+        return view
+
+    async def _replace_latest(
+        self, name: str, source_tag: str, author: str, annotations: dict[str, str]
+    ) -> ScriptView:
         try:
             await self._lock_name(name)
-            source = await self._get_tag(name, version)
-            latest = _copy_as_latest(source, version, author)
+            source = await self._get_tag(name, source_tag)
+            latest = _copy_as_latest(source, author, annotations)
             await self.client.apply_resource(resource=latest, auth_headers=self.auth_headers)
             items = await self._tag_items(name)
         except AgentRegistryError as error:
-            raise _translate_registry_error(error, name, version) from error
+            raise _translate_registry_error(error, name, source_tag) from error
         finally:
             self.db.rollback()
-        logging.info(f"script_rollback name={name} version={version} author={author}")
         return _build_view(latest, items)
 
     async def _lock_name(self, name: str) -> None:
@@ -162,14 +206,14 @@ class ScriptCatalog:
 
 def _translate_registry_error(error: AgentRegistryError, name: str, version: str) -> ScriptRuleError:
     if error.status_code == 404:
-        return ScriptRuleError(f"Script não encontrado: {name}@{version}")
+        return ScriptRuleError(f"Script não encontrado: {name}@{version}", 404)
     if error.status_code == 429:
         retry_after = getattr(error, "retry_after", None)
         wait = f"em {retry_after} s" if retry_after else "de novo em instantes"
-        return ScriptRuleError(f"Limite da Store atingido; tente {wait}")
+        return ScriptRuleError(f"Limite da Store atingido; tente {wait}", 429)
     if error.status_code == 502:
-        return ScriptRuleError("Store indisponível; tente de novo em instantes")
-    return ScriptRuleError(error.detail)
+        return ScriptRuleError("Store indisponível; tente de novo em instantes", 502)
+    return ScriptRuleError(error.detail, error.status_code)
 
 
 def _now() -> str:
@@ -189,12 +233,16 @@ def _numbered_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(numbered, key=lambda item: int(item["metadata"]["tag"]), reverse=True)
 
 
-def _copy_as_latest(source: dict[str, Any], version: str, author: str) -> dict[str, Any]:
+def is_retired(resource: dict[str, Any]) -> bool:
+    return _annotations(resource).get(OBSOLETE_KEY) == "true"
+
+
+def _copy_as_latest(source: dict[str, Any], author: str, extra: dict[str, str]) -> dict[str, Any]:
     annotations = {
         **_annotations(source),
-        VERSION_KEY: version,
         AUTHOR_KEY: author,
         PUBLISHED_KEY: _now(),
+        **extra,
     }
     return {
         "apiVersion": source.get("apiVersion"),
@@ -210,7 +258,8 @@ def _copy_as_latest(source: dict[str, Any], version: str, author: str) -> dict[s
 
 def _build_view(resource: dict[str, Any], items: list[dict[str, Any]]) -> ScriptView:
     spec = resource.get("spec") or {}
-    latest_version = _annotations(_find_tag(items, LATEST_TAG) or {}).get(VERSION_KEY)
+    latest = _find_tag(items, LATEST_TAG) or {}
+    latest_version = _annotations(latest).get(VERSION_KEY)
     version = _annotations(resource).get(VERSION_KEY)
     content = spec.get("content") or ""
     return ScriptView(
@@ -220,10 +269,18 @@ def _build_view(resource: dict[str, Any], items: list[dict[str, Any]]) -> Script
         file_name=spec.get("fileName") or "",
         content=content,
         sha256=content_sha256(content),
-        warning=effect_warning(spec.get("effects") or []),
+        warning=_view_warning(spec.get("effects") or [], is_retired(latest)),
         card=_build_card(spec, _annotations(resource)),
         versions=_build_versions(items, latest_version),
     )
+
+
+def _view_warning(effects: list[str], retired: bool) -> str | None:
+    warnings = [OBSOLETE_WARNING] if retired else []
+    effect = effect_warning(effects)
+    if effect:
+        warnings.append(effect)
+    return ". ".join(warnings) or None
 
 
 def _build_card(spec: dict[str, Any], annotations: dict[str, str]) -> ScriptCard:

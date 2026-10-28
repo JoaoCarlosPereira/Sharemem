@@ -18,7 +18,10 @@ from app.services.store_recipes import (
     RegistryResourceNotFound,
     StoreRecipeError,
 )
+from app.database import get_db
 from app.services.hook_packages import HookPackageInput
+from app.services.script_catalog import ScriptCatalog, ScriptView
+from app.services.script_packages import ScriptRuleError
 from app.services.plugin_packages import PluginPackageInput, PluginPackageMetadata
 from app.services.skill_packages import SkillPackageInput
 from app.utils.agentregistry import AgentRegistryHttpClient, AgentRegistryError
@@ -26,6 +29,7 @@ from app.utils.logging_context import auth_method_var, auth_user_var, team_var
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import Response
 from pydantic import BaseModel, Field, ValidationError
+from sqlalchemy.orm import Session
 
 router = APIRouter(prefix=STORE_API_PREFIX, tags=["store"])
 
@@ -456,6 +460,22 @@ async def delete_hook_package(
     except AgentRegistryError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
     return {"deleted": True, "name": name, "tag": tag, "result": result}
+
+
+@router.get("/scripts/{name}")
+@router.get("/scripts/{name}/{version}")
+async def get_store_script(
+    name: str,
+    request: Request,
+    version: Optional[str] = None,
+    client: AgentRegistryHttpClient = Depends(get_registry_client),
+    db: Session = Depends(get_db),
+) -> ScriptView:
+    catalog = ScriptCatalog(client, db, _registry_auth_headers(request))
+    try:
+        return await catalog.get(name, version)
+    except ScriptRuleError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
 
 @router.put("/plugins/{name:path}/{tag}")

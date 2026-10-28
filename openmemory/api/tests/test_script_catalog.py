@@ -5,7 +5,12 @@ import threading
 from unittest.mock import MagicMock
 
 import pytest
+from sqlalchemy import create_engine, event, select
+from sqlalchemy.exc import OperationalError
+from sqlalchemy.orm import Session
+from sqlalchemy.pool import StaticPool
 
+from app.models import ScriptDownload
 from app.services.script_catalog import ScriptCatalog
 from app.services.script_packages import ScriptInput, ScriptRuleError, content_sha256
 from app.utils.agentregistry import (
@@ -56,6 +61,7 @@ def _db(log, dialect="sqlite"):
     db.execute.side_effect = lambda stmt, params=None: log.append(("execute", str(stmt), params))
     db.rollback.side_effect = lambda: log.append(("end_transaction",))
     db.commit.side_effect = lambda: log.append(("end_transaction",))
+    db.scalar.return_value = 0
     return db
 
 
@@ -85,6 +91,13 @@ def _catalog(dialect="sqlite"):
 
 def _registry_calls(log):
     return [entry for entry in log if entry[0] in ("get", "tags", "apply")]
+
+
+def _sqlite_catalog():
+    engine = create_engine("sqlite://", poolclass=StaticPool)
+    ScriptDownload.__table__.create(engine)
+    registry = FakeRegistry([])
+    return ScriptCatalog(registry, Session(engine), AUTH), registry, engine
 
 
 @pytest.mark.asyncio
@@ -461,3 +474,199 @@ async def test_publish_and_rollback_are_logged(caplog):
     assert f"script_publish name={NAME} version=1 created=True author=pessoa-1" in messages
     assert f"script_publish name={NAME} version=1 created=False author=pessoa-1" in messages
     assert f"script_rollback name={NAME} version=1 author=pessoa-2" in messages
+
+
+@pytest.mark.asyncio
+async def test_scr19_retire_marks_only_latest_obsolete_and_keeps_spec():
+    catalog, registry, log = _catalog()
+    await catalog.publish(_script(), "pessoa-1")
+    published_spec = copy.deepcopy(registry.store[(NAME, "latest")]["spec"])
+    log.clear()
+
+    view = await catalog.retire(NAME, "pessoa-2")
+
+    latest = registry.store[(NAME, "latest")]
+    annotations = latest["metadata"]["annotations"]
+    assert annotations["sharemem.io/obsoleto"] == "true"
+    assert annotations["sharemem.io/versao"] == "1"
+    assert annotations["sharemem.io/autor"] == "pessoa-2"
+    assert latest["spec"] == published_spec
+    assert "sharemem.io/obsoleto" not in registry.store[(NAME, "1")]["metadata"]["annotations"]
+    assert [call[3] for call in _registry_calls(log) if call[0] == "apply"] == ["latest"]
+    assert (view.version, view.warning) == ("1", "Script obsoleto")
+
+
+@pytest.mark.asyncio
+async def test_scr19_retired_script_is_still_delivered_with_warning():
+    catalog, _, _ = _catalog()
+    await catalog.publish(_script(), "pessoa-1")
+    await catalog.retire(NAME, "pessoa-2")
+
+    latest = await catalog.get(NAME)
+    fixed = await catalog.get(NAME, "1")
+
+    assert (latest.content, latest.warning) == ("print('v1')\n", "Script obsoleto")
+    assert (fixed.content, fixed.warning) == ("print('v1')\n", "Script obsoleto")
+
+
+@pytest.mark.asyncio
+async def test_scr19_retired_warning_keeps_effect_warning():
+    catalog, _, _ = _catalog()
+    await catalog.publish(_script(effects=["altera-banco"]), "pessoa-1")
+    await catalog.retire(NAME, "pessoa-2")
+
+    view = await catalog.get(NAME)
+
+    assert view.warning == (
+        "Script obsoleto. Este script altera-banco; confirme com o usuário antes de rodar"
+    )
+
+
+@pytest.mark.asyncio
+async def test_scr19_publishing_new_version_clears_obsolete_mark():
+    catalog, registry, _ = _catalog()
+    await catalog.publish(_script(), "pessoa-1")
+    await catalog.retire(NAME, "pessoa-2")
+
+    result = await catalog.publish(_script(content="print('v2')\n"), "pessoa-3")
+    view = await catalog.get(NAME)
+
+    assert (result.version, result.created) == ("2", True)
+    assert "sharemem.io/obsoleto" not in registry.store[(NAME, "latest")]["metadata"]["annotations"]
+    assert view.warning is None
+
+
+@pytest.mark.asyncio
+async def test_scr19_retire_takes_publish_lock_before_reading_latest():
+    catalog, _, log = _catalog(dialect="postgresql")
+    await catalog.publish(_script(), "pessoa-1")
+    log.clear()
+
+    await catalog.retire(NAME, "pessoa-2")
+
+    kinds = [entry[0] for entry in log]
+    _, sql, params = log[kinds.index("execute")]
+    assert "pg_advisory_xact_lock(hashtext(:key))" in sql
+    assert params == {"key": f"script_publish:{NAME}"}
+    assert kinds.index("execute") < kinds.index("get") < kinds.index("apply")
+    assert kinds.index("apply") < kinds.index("end_transaction")
+
+
+@pytest.mark.asyncio
+async def test_scr19_retire_missing_script_is_reported():
+    catalog, _, _ = _catalog()
+
+    with pytest.raises(ScriptRuleError) as exc:
+        await catalog.retire(NAME, "pessoa-2")
+
+    assert str(exc.value) == f"Script não encontrado: {NAME}@latest"
+
+
+@pytest.mark.asyncio
+async def test_retire_is_logged(caplog):
+    catalog, _, _ = _catalog()
+    await catalog.publish(_script(), "pessoa-1")
+    caplog.set_level(logging.INFO)
+
+    await catalog.retire(NAME, "pessoa-2")
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert f"script_retire name={NAME} author=pessoa-2" in messages
+
+
+@pytest.mark.asyncio
+async def test_scr23_get_records_name_version_hostname_and_time():
+    catalog, _, _ = _sqlite_catalog()
+    await catalog.publish(_script(), "pessoa-1")
+    await catalog.publish(_script(content="print('v2')\n"), "pessoa-1")
+    before = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+
+    await catalog.get(NAME, "1", hostname="maquina-a")
+
+    rows = catalog.db.scalars(select(ScriptDownload)).all()
+    assert [(row.name, row.version, row.hostname) for row in rows] == [(NAME, "1", "maquina-a")]
+    downloaded_at = rows[0].downloaded_at.replace(tzinfo=None)
+    assert before - datetime.timedelta(seconds=1) <= downloaded_at <= before + datetime.timedelta(minutes=1)
+
+
+@pytest.mark.asyncio
+async def test_scr24_two_downloads_from_different_machines_count_two():
+    catalog, _, _ = _sqlite_catalog()
+    await catalog.publish(_script(), "pessoa-1")
+
+    await catalog.get(NAME, hostname="maquina-a")
+    view = await catalog.get(NAME, hostname="maquina-b")
+
+    assert view.card.downloads_30d == 2
+
+
+@pytest.mark.asyncio
+async def test_scr24_download_older_than_30_days_is_not_counted():
+    catalog, _, _ = _sqlite_catalog()
+    await catalog.publish(_script(), "pessoa-1")
+    old = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=31)
+    catalog.db.add(ScriptDownload(name=NAME, version="1", hostname="maquina-a", downloaded_at=old))
+    catalog.db.add(ScriptDownload(name="outro-script", version="1", hostname="maquina-a"))
+    catalog.db.commit()
+
+    view = await catalog.get(NAME, hostname="maquina-b")
+
+    assert view.card.downloads_30d == 1
+
+
+@pytest.mark.asyncio
+async def test_scr24_download_count_is_a_single_select():
+    catalog, _, engine = _sqlite_catalog()
+    await catalog.publish(_script(), "pessoa-1")
+    statements = []
+    event.listen(engine, "before_cursor_execute", lambda *args: statements.append(args[2]))
+
+    await catalog.get(NAME, hostname="maquina-a")
+
+    selects = [sql for sql in statements if sql.lstrip().upper().startswith("SELECT")]
+    inserts = [sql for sql in statements if sql.lstrip().upper().startswith("INSERT")]
+    assert len(selects) == 1 and "count(" in selects[0].lower()
+    assert len(inserts) == 1
+
+
+@pytest.mark.asyncio
+async def test_scr23_failed_insert_does_not_block_get(caplog):
+    catalog, _, engine = _sqlite_catalog()
+    await catalog.publish(_script(), "pessoa-1")
+    ScriptDownload.__table__.drop(engine)
+
+    view = await catalog.get(NAME, hostname="maquina-a")
+
+    assert view.content == "print('v1')\n"
+    assert view.card.downloads_30d is None
+    assert any(
+        record.levelname == "ERROR" and f"script_download name={NAME}" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+@pytest.mark.asyncio
+async def test_scr23_failed_insert_keeps_count_of_previous_downloads(monkeypatch):
+    catalog, _, _ = _sqlite_catalog()
+    await catalog.publish(_script(), "pessoa-1")
+    await catalog.get(NAME, hostname="maquina-a")
+
+    def failing_commit():
+        raise OperationalError("INSERT", {}, Exception("banco fora"))
+
+    monkeypatch.setattr(catalog.db, "commit", failing_commit)
+    view = await catalog.get(NAME, hostname="maquina-b")
+
+    assert view.content == "print('v1')\n"
+    assert view.card.downloads_30d == 1
+
+
+@pytest.mark.asyncio
+async def test_scr23_get_without_hostname_does_not_record():
+    catalog, _, _ = _sqlite_catalog()
+    await catalog.publish(_script(), "pessoa-1")
+
+    view = await catalog.get(NAME)
+
+    assert catalog.db.scalars(select(ScriptDownload)).all() == []
+    assert view.card.downloads_30d == 0

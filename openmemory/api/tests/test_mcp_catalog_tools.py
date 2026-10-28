@@ -152,6 +152,19 @@ async def test_scr07_search_script_kind_returns_card_with_latest_only(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_scr19_search_omits_retired_scripts(monkeypatch):
+    fake = FakeCatalogClient()
+    retired = _script_resource("gcenfe02-xml")
+    retired["metadata"]["annotations"]["sharemem.io/obsoleto"] = "true"
+    fake.items = [retired, _script_resource("outro-script")]
+    monkeypatch.setattr(mcp_server, "get_agent_registry_client", lambda: fake)
+
+    out = await mcp_server.search_catalog(query="", kind="script")
+
+    assert [result["name"] for result in json.loads(out)["results"]] == ["outro-script"]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("requested,sent", [(500, 100), (None, 20)])
 async def test_scr09_search_limit_is_clamped(monkeypatch, requested, sent):
     fake = FakeCatalogClient()
@@ -212,13 +225,17 @@ class FakeScriptCatalog:
         self.calls.append(("publish", script, author))
         return PublishResult(name=script.name, version="1", sha256="abc", created=True)
 
-    async def get(self, name, version=None):
-        self.calls.append(("get", name, version))
+    async def get(self, name, version=None, hostname=None):
+        self.calls.append(("get", name, version, hostname))
         return _script_view(version or "2")
 
     async def rollback(self, name, version, author):
         self.calls.append(("rollback", name, version, author))
         return _script_view(version, "print(1)\n")
+
+    async def retire(self, name, author):
+        self.calls.append(("retire", name, author))
+        return _script_view().model_copy(update={"warning": "Script obsoleto"})
 
 
 @pytest.fixture
@@ -231,7 +248,11 @@ def script_catalog(monkeypatch):
     monkeypatch.setattr(mcp_server, "get_agent_registry_client", lambda: fake_client)
     token_auth = mcp_server.registry_auth_headers_var.set({"Authorization": "Bearer omtk_token"})
     token_user = mcp_server.auth_user_var.set("person-1")
+    token_host = mcp_server.user_id_var.set("maquina-a")
+    token_machine = mcp_server.machine_var.set("")
     yield FakeScriptCatalog
+    mcp_server.machine_var.reset(token_machine)
+    mcp_server.user_id_var.reset(token_host)
     mcp_server.auth_user_var.reset(token_user)
     mcp_server.registry_auth_headers_var.reset(token_auth)
 
@@ -288,14 +309,27 @@ async def test_scr10_get_script_returns_script_view_json(script_catalog):
     out = await mcp_server.get_script(name="gcenfe02-xml")
 
     assert json.loads(out) == _script_view().model_dump()
-    assert script_catalog.instances[0].calls == [("get", "gcenfe02-xml", None)]
+    assert script_catalog.instances[0].calls == [("get", "gcenfe02-xml", None, "maquina-a")]
+
+
+@pytest.mark.asyncio
+async def test_scr23_get_script_prefers_machine_bound_to_agent_token(script_catalog):
+    token_method = mcp_server.auth_method_var.set("agent_token")
+    token_machine = mcp_server.machine_var.set("maquina-do-token")
+    try:
+        await mcp_server.get_script(name="gcenfe02-xml", version="1")
+    finally:
+        mcp_server.machine_var.reset(token_machine)
+        mcp_server.auth_method_var.reset(token_method)
+
+    assert script_catalog.instances[0].calls == [("get", "gcenfe02-xml", "1", "maquina-do-token")]
 
 
 @pytest.mark.asyncio
 async def test_get_script_translated_error_becomes_error_message(script_catalog, monkeypatch):
     from app.services.script_packages import ScriptRuleError
 
-    async def missing(self, name, version=None):
+    async def missing(self, name, version=None, hostname=None):
         raise ScriptRuleError("Script não encontrado: nao-existe@9")
 
     monkeypatch.setattr(FakeScriptCatalog, "get", missing)
@@ -307,7 +341,7 @@ async def test_get_script_translated_error_becomes_error_message(script_catalog,
 
 @pytest.mark.asyncio
 async def test_get_script_unexpected_error_is_logged_and_returned(script_catalog, monkeypatch, caplog):
-    async def broken(self, name, version=None):
+    async def broken(self, name, version=None, hostname=None):
         raise RuntimeError("falha inesperada")
 
     monkeypatch.setattr(FakeScriptCatalog, "get", broken)
@@ -335,6 +369,23 @@ async def test_scr29_rollback_script_returns_new_latest(script_catalog):
 
     assert json.loads(out) == _script_view("1", "print(1)\n").model_dump()
     assert script_catalog.instances[0].calls == [("rollback", "gcenfe02-xml", "1", "person-1")]
+
+
+@pytest.mark.asyncio
+async def test_scr19_retire_script_requires_confirmation(script_catalog):
+    out = await mcp_server.retire_script(name="gcenfe02-xml")
+
+    assert out.startswith("Error: ")
+    assert "confirm_user_requested=true" in out
+    assert script_catalog.instances == []
+
+
+@pytest.mark.asyncio
+async def test_scr19_retire_script_returns_view_with_obsolete_warning(script_catalog):
+    out = await mcp_server.retire_script(name="gcenfe02-xml", confirm_user_requested=True)
+
+    assert json.loads(out)["warning"] == "Script obsoleto"
+    assert script_catalog.instances[0].calls == [("retire", "gcenfe02-xml", "person-1")]
 
 
 @pytest.mark.asyncio

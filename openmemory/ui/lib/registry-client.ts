@@ -9,9 +9,14 @@ export const REGISTRY_RESOURCE_KINDS = [
   "prompts",
   "agents",
   "plugins",
+  "scripts",
 ] as const;
 
 export type RegistryResourceKind = (typeof REGISTRY_RESOURCE_KINDS)[number];
+
+export const PUBLISHABLE_RESOURCE_KINDS = REGISTRY_RESOURCE_KINDS.filter(
+  (kind) => kind !== "scripts",
+);
 
 export const REGISTRY_KIND_LABELS: Record<RegistryResourceKind, string> = {
   skills: "Skills",
@@ -20,6 +25,7 @@ export const REGISTRY_KIND_LABELS: Record<RegistryResourceKind, string> = {
   prompts: "Prompts",
   agents: "Agents",
   plugins: "Plugins",
+  scripts: "Scripts",
 };
 
 export const REGISTRY_KIND_API_KIND: Record<RegistryResourceKind, string> = {
@@ -29,7 +35,42 @@ export const REGISTRY_KIND_API_KIND: Record<RegistryResourceKind, string> = {
   prompts: "Prompt",
   agents: "Agent",
   plugins: "Plugin",
+  scripts: "Script",
 };
+
+export const SCRIPT_VERSION_ANNOTATION = "sharemem.io/versao";
+export const SCRIPT_AUTHOR_ANNOTATION = "sharemem.io/autor";
+
+export interface ScriptVersionEntry {
+  version: string;
+  author: string | null;
+  published_at: string | null;
+  is_latest: boolean;
+}
+
+export interface ScriptView {
+  name: string;
+  version: string | null;
+  is_latest: boolean;
+  file_name: string;
+  content: string;
+  sha256: string;
+  warning: string | null;
+  card: {
+    title: string | null;
+    description: string;
+    usage: string;
+    language: string;
+    requirements: string[];
+    effects: string[];
+    area: string;
+    tags: string[];
+    author: string | null;
+    published_at: string | null;
+    downloads_30d: number | null;
+  };
+  versions: ScriptVersionEntry[];
+}
 
 export interface RegistryResource {
   apiVersion?: string;
@@ -117,15 +158,34 @@ export async function listRegistryResources(
     {
       params: {
         namespace: "all",
-        // Do NOT pass latestOnly: the registry treats it as tag=latest literally,
-        // which hides catalog entries published as 1.0.0 / semver (mem0 skills).
         limit: 100,
+        ...(kind === "scripts" ? { latestOnly: true } : {}),
       },
     },
   );
   return dedupeLatestResources(
     normalizeRegistryItems(kind, response.data?.items ?? []),
   );
+}
+
+export async function getStoreScript(name: string, version?: string): Promise<ScriptView> {
+  const segments = ["/api-proxy/api/v1/store/scripts", encodeURIComponent(name)];
+  if (version) segments.push(encodeURIComponent(version));
+  const response = await apiClient.get<ScriptView>(segments.join("/"));
+  return response.data;
+}
+
+export function scriptListSummary(resource: RegistryResource): string[] {
+  const spec = resource.spec ?? {};
+  const annotations = resource.metadata.annotations ?? {};
+  const effects = Array.isArray(spec.effects) ? spec.effects.join(", ") : "";
+  const version = annotations[SCRIPT_VERSION_ANNOTATION];
+  return [
+    typeof spec.language === "string" ? spec.language : "",
+    effects,
+    annotations[SCRIPT_AUTHOR_ANNOTATION] ?? "",
+    version ? `versão ${version}` : "",
+  ].filter(Boolean);
 }
 
 /** Keep one row per (namespace, name) — prefer most recently updated tag. */
@@ -220,6 +280,7 @@ const REGISTRY_KIND_TO_RECIPE_KIND: Record<RegistryResourceKind, string> = {
   prompts: "prompt",
   agents: "agent",
   plugins: "plugin",
+  scripts: "script",
 };
 
 export async function fetchInstallRecipe(input: {
