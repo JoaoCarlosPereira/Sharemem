@@ -6,9 +6,11 @@ from typing import Any
 
 import anyio
 from pydantic import BaseModel
-from sqlalchemy import text
+from sqlalchemy import func, select, text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from app.models import ScriptDownload, get_current_utc_time
 from app.services.script_packages import (
     ScriptInput,
     ScriptRuleError,
@@ -28,6 +30,7 @@ PUBLISHED_KEY = "sharemem.io/publicado-em"
 SHA256_KEY = "sharemem.io/sha256"
 OBSOLETE_KEY = "sharemem.io/obsoleto"
 OBSOLETE_WARNING = "Script obsoleto"
+DOWNLOAD_WINDOW = datetime.timedelta(days=30)
 
 
 class PublishResult(BaseModel):
@@ -55,6 +58,7 @@ class ScriptCard(BaseModel):
     tags: list[str]
     author: str | None
     published_at: str | None
+    downloads_30d: int | None = None
 
 
 class ScriptView(BaseModel):
@@ -95,14 +99,41 @@ class ScriptCatalog:
         )
         return result
 
-    async def get(self, name: str, version: str | None = None) -> ScriptView:
+    async def get(
+        self, name: str, version: str | None = None, hostname: str | None = None
+    ) -> ScriptView:
         tag = version or LATEST_TAG
         try:
             resource = await self._get_tag(name, tag)
             items = await self._tag_items(name)
         except AgentRegistryError as error:
             raise _translate_registry_error(error, name, tag) from error
-        return _build_view(resource, items)
+        view = _build_view(resource, items)
+        if hostname:
+            self._record_download(name, view.version or tag, hostname)
+        view.card.downloads_30d = self._count_downloads(name)
+        return view
+
+    def _record_download(self, name: str, version: str, hostname: str) -> None:
+        try:
+            self.db.add(ScriptDownload(name=name, version=version, hostname=hostname))
+            self.db.commit()
+        except SQLAlchemyError:
+            self.db.rollback()
+            logging.exception(f"script_download name={name} version={version} hostname={hostname}")
+
+    def _count_downloads(self, name: str) -> int | None:
+        since = get_current_utc_time() - DOWNLOAD_WINDOW
+        try:
+            return self.db.scalar(
+                select(func.count())
+                .select_from(ScriptDownload)
+                .where(ScriptDownload.name == name, ScriptDownload.downloaded_at >= since)
+            )
+        except SQLAlchemyError:
+            self.db.rollback()
+            logging.exception(f"script_download_count name={name}")
+            return None
 
     async def rollback(self, name: str, version: str, author: str) -> ScriptView:
         view = await self._replace_latest(name, version, author, {VERSION_KEY: version})

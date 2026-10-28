@@ -5,7 +5,12 @@ import threading
 from unittest.mock import MagicMock
 
 import pytest
+from sqlalchemy import create_engine, event, select
+from sqlalchemy.exc import OperationalError
+from sqlalchemy.orm import Session
+from sqlalchemy.pool import StaticPool
 
+from app.models import ScriptDownload
 from app.services.script_catalog import ScriptCatalog
 from app.services.script_packages import ScriptInput, ScriptRuleError, content_sha256
 from app.utils.agentregistry import (
@@ -56,6 +61,7 @@ def _db(log, dialect="sqlite"):
     db.execute.side_effect = lambda stmt, params=None: log.append(("execute", str(stmt), params))
     db.rollback.side_effect = lambda: log.append(("end_transaction",))
     db.commit.side_effect = lambda: log.append(("end_transaction",))
+    db.scalar.return_value = 0
     return db
 
 
@@ -85,6 +91,13 @@ def _catalog(dialect="sqlite"):
 
 def _registry_calls(log):
     return [entry for entry in log if entry[0] in ("get", "tags", "apply")]
+
+
+def _sqlite_catalog():
+    engine = create_engine("sqlite://", poolclass=StaticPool)
+    ScriptDownload.__table__.create(engine)
+    registry = FakeRegistry([])
+    return ScriptCatalog(registry, Session(engine), AUTH), registry, engine
 
 
 @pytest.mark.asyncio
@@ -559,3 +572,101 @@ async def test_retire_is_logged(caplog):
 
     messages = [record.getMessage() for record in caplog.records]
     assert f"script_retire name={NAME} author=pessoa-2" in messages
+
+
+@pytest.mark.asyncio
+async def test_scr23_get_records_name_version_hostname_and_time():
+    catalog, _, _ = _sqlite_catalog()
+    await catalog.publish(_script(), "pessoa-1")
+    await catalog.publish(_script(content="print('v2')\n"), "pessoa-1")
+    before = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+
+    await catalog.get(NAME, "1", hostname="maquina-a")
+
+    rows = catalog.db.scalars(select(ScriptDownload)).all()
+    assert [(row.name, row.version, row.hostname) for row in rows] == [(NAME, "1", "maquina-a")]
+    downloaded_at = rows[0].downloaded_at.replace(tzinfo=None)
+    assert before - datetime.timedelta(seconds=1) <= downloaded_at <= before + datetime.timedelta(minutes=1)
+
+
+@pytest.mark.asyncio
+async def test_scr24_two_downloads_from_different_machines_count_two():
+    catalog, _, _ = _sqlite_catalog()
+    await catalog.publish(_script(), "pessoa-1")
+
+    await catalog.get(NAME, hostname="maquina-a")
+    view = await catalog.get(NAME, hostname="maquina-b")
+
+    assert view.card.downloads_30d == 2
+
+
+@pytest.mark.asyncio
+async def test_scr24_download_older_than_30_days_is_not_counted():
+    catalog, _, _ = _sqlite_catalog()
+    await catalog.publish(_script(), "pessoa-1")
+    old = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=31)
+    catalog.db.add(ScriptDownload(name=NAME, version="1", hostname="maquina-a", downloaded_at=old))
+    catalog.db.add(ScriptDownload(name="outro-script", version="1", hostname="maquina-a"))
+    catalog.db.commit()
+
+    view = await catalog.get(NAME, hostname="maquina-b")
+
+    assert view.card.downloads_30d == 1
+
+
+@pytest.mark.asyncio
+async def test_scr24_download_count_is_a_single_select():
+    catalog, _, engine = _sqlite_catalog()
+    await catalog.publish(_script(), "pessoa-1")
+    statements = []
+    event.listen(engine, "before_cursor_execute", lambda *args: statements.append(args[2]))
+
+    await catalog.get(NAME, hostname="maquina-a")
+
+    selects = [sql for sql in statements if sql.lstrip().upper().startswith("SELECT")]
+    inserts = [sql for sql in statements if sql.lstrip().upper().startswith("INSERT")]
+    assert len(selects) == 1 and "count(" in selects[0].lower()
+    assert len(inserts) == 1
+
+
+@pytest.mark.asyncio
+async def test_scr23_failed_insert_does_not_block_get(caplog):
+    catalog, _, engine = _sqlite_catalog()
+    await catalog.publish(_script(), "pessoa-1")
+    ScriptDownload.__table__.drop(engine)
+
+    view = await catalog.get(NAME, hostname="maquina-a")
+
+    assert view.content == "print('v1')\n"
+    assert view.card.downloads_30d is None
+    assert any(
+        record.levelname == "ERROR" and f"script_download name={NAME}" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+@pytest.mark.asyncio
+async def test_scr23_failed_insert_keeps_count_of_previous_downloads(monkeypatch):
+    catalog, _, _ = _sqlite_catalog()
+    await catalog.publish(_script(), "pessoa-1")
+    await catalog.get(NAME, hostname="maquina-a")
+
+    def failing_commit():
+        raise OperationalError("INSERT", {}, Exception("banco fora"))
+
+    monkeypatch.setattr(catalog.db, "commit", failing_commit)
+    view = await catalog.get(NAME, hostname="maquina-b")
+
+    assert view.content == "print('v1')\n"
+    assert view.card.downloads_30d == 1
+
+
+@pytest.mark.asyncio
+async def test_scr23_get_without_hostname_does_not_record():
+    catalog, _, _ = _sqlite_catalog()
+    await catalog.publish(_script(), "pessoa-1")
+
+    view = await catalog.get(NAME)
+
+    assert catalog.db.scalars(select(ScriptDownload)).all() == []
+    assert view.card.downloads_30d == 0

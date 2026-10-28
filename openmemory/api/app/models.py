@@ -1064,6 +1064,17 @@ class SpecPlankaIdMap(Base):
     )
 
 
+class ScriptDownload(Base):
+    __tablename__ = "script_downloads"
+    id = Column(UUID, primary_key=True, default=lambda: uuid.uuid4())
+    name = Column(String, nullable=False)
+    version = Column(String, nullable=False)
+    hostname = Column(String, nullable=False)
+    downloaded_at = Column(DateTime, nullable=False, default=get_current_utc_time)
+
+    __table_args__ = (Index("idx_script_downloads_name_time", "name", "downloaded_at"),)
+
+
 def categorize_memory(memory: Memory, db: Session) -> None:
     """Categorize a memory using OpenAI and store the categories in the database."""
     try:

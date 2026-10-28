@@ -1675,7 +1675,9 @@ async def publish_script(
 
 @mcp.tool(description="Baixa um Script da Store pelo nome (latest ou versão fixa) com conteúdo, sha256, ficha, aviso de efeito e versões.")
 async def get_script(name: str, version: str | None = None) -> str:
-    return await _run_script_catalog(lambda catalog: catalog.get(name, version))
+    return await _run_script_catalog(
+        lambda catalog: catalog.get(name, version, hostname=_mcp_attribution_hostname())
+    )
 
 
 @mcp.tool(description="Volta a latest de um Script para uma versão anterior sem apagar as mais novas. Exige confirm_user_requested=true.")
