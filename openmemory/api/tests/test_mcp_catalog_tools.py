@@ -152,6 +152,19 @@ async def test_scr07_search_script_kind_returns_card_with_latest_only(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_scr19_search_omits_retired_scripts(monkeypatch):
+    fake = FakeCatalogClient()
+    retired = _script_resource("gcenfe02-xml")
+    retired["metadata"]["annotations"]["sharemem.io/obsoleto"] = "true"
+    fake.items = [retired, _script_resource("outro-script")]
+    monkeypatch.setattr(mcp_server, "get_agent_registry_client", lambda: fake)
+
+    out = await mcp_server.search_catalog(query="", kind="script")
+
+    assert [result["name"] for result in json.loads(out)["results"]] == ["outro-script"]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("requested,sent", [(500, 100), (None, 20)])
 async def test_scr09_search_limit_is_clamped(monkeypatch, requested, sent):
     fake = FakeCatalogClient()
@@ -219,6 +232,10 @@ class FakeScriptCatalog:
     async def rollback(self, name, version, author):
         self.calls.append(("rollback", name, version, author))
         return _script_view(version, "print(1)\n")
+
+    async def retire(self, name, author):
+        self.calls.append(("retire", name, author))
+        return _script_view().model_copy(update={"warning": "Script obsoleto"})
 
 
 @pytest.fixture
@@ -335,6 +352,23 @@ async def test_scr29_rollback_script_returns_new_latest(script_catalog):
 
     assert json.loads(out) == _script_view("1", "print(1)\n").model_dump()
     assert script_catalog.instances[0].calls == [("rollback", "gcenfe02-xml", "1", "person-1")]
+
+
+@pytest.mark.asyncio
+async def test_scr19_retire_script_requires_confirmation(script_catalog):
+    out = await mcp_server.retire_script(name="gcenfe02-xml")
+
+    assert out.startswith("Error: ")
+    assert "confirm_user_requested=true" in out
+    assert script_catalog.instances == []
+
+
+@pytest.mark.asyncio
+async def test_scr19_retire_script_returns_view_with_obsolete_warning(script_catalog):
+    out = await mcp_server.retire_script(name="gcenfe02-xml", confirm_user_requested=True)
+
+    assert json.loads(out)["warning"] == "Script obsoleto"
+    assert script_catalog.instances[0].calls == [("retire", "gcenfe02-xml", "person-1")]
 
 
 @pytest.mark.asyncio

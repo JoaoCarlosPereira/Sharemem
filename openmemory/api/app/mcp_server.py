@@ -1355,6 +1355,7 @@ async def search_catalog(
             summarize_resource,
             validate_catalog_kind,
         )
+        from app.services.script_catalog import is_retired
 
         client = get_agent_registry_client()
         safe_limit = clamp_limit(limit)
@@ -1374,7 +1375,7 @@ async def search_catalog(
             for resource in items:
                 if not isinstance(resource, dict):
                     continue
-                if not resource_matches_query(resource, query):
+                if is_retired(resource) or not resource_matches_query(resource, query):
                     continue
                 summary = summarize_resource(resource)
                 summary["resource"] = resource
@@ -1684,6 +1685,13 @@ async def rollback_script(name: str, version: str, confirm_user_requested: bool 
     return await _run_script_catalog(
         lambda catalog: catalog.rollback(name, version, _current_mcp_actor_id())
     )
+
+
+@mcp.tool(description="Marca um Script como obsoleto: sai da busca, mas continua baixável pelo nome com o aviso \"Script obsoleto\". Exige confirm_user_requested=true.")
+async def retire_script(name: str, confirm_user_requested: bool = False) -> str:
+    if not confirm_user_requested:
+        return "Error: retire_script exige pedido explícito do desenvolvedor (confirm_user_requested=true)"
+    return await _run_script_catalog(lambda catalog: catalog.retire(name, _current_mcp_actor_id()))
 
 
 @mcp.tool(description="Build a host-applied install recipe for a catalog resource using ShareMem InstallRecipeService. This does not write files itself, but it starts an install workflow; only call after an explicit developer request to install and pass confirm_user_requested=true.")
