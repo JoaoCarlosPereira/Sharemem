@@ -344,6 +344,45 @@ async def test_scr16_republishing_rolled_back_version_keeps_latest_version():
 
 
 @pytest.mark.asyncio
+async def test_scr18_rollback_takes_publish_lock_before_reading_tag():
+    catalog, _, log = _catalog(dialect="postgresql")
+    await catalog.publish(_script(), "pessoa-1")
+    await catalog.publish(_script(content="print('v2')\n"), "pessoa-1")
+    log.clear()
+
+    await catalog.rollback(NAME, "1", "pessoa-2")
+
+    kinds = [entry[0] for entry in log]
+    _, sql, params = log[kinds.index("execute")]
+    assert "pg_advisory_xact_lock(hashtext(:key))" in sql
+    assert params == {"key": f"script_publish:{NAME}"}
+    assert kinds.index("execute") < kinds.index("get") < kinds.index("apply")
+    assert kinds.index("apply") < kinds.index("end_transaction")
+
+
+@pytest.mark.asyncio
+async def test_scr18_rollback_lock_wait_runs_off_the_event_loop_thread():
+    catalog, _, _ = _catalog(dialect="postgresql")
+    await catalog.publish(_script(), "pessoa-1")
+    threads = []
+    catalog.db.execute.side_effect = lambda stmt, params=None: threads.append(threading.get_ident())
+
+    await catalog.rollback(NAME, "1", "pessoa-2")
+
+    assert threads and threads[0] != threading.get_ident()
+
+
+@pytest.mark.asyncio
+async def test_scr18_rollback_with_sqlite_does_not_take_lock():
+    catalog, _, log = _catalog(dialect="sqlite")
+    await catalog.publish(_script(), "pessoa-1")
+
+    await catalog.rollback(NAME, "1", "pessoa-2")
+
+    assert [entry for entry in log if entry[0] == "execute"] == []
+
+
+@pytest.mark.asyncio
 async def test_scr29_rollback_to_missing_version_is_reported():
     catalog, _, _ = _catalog()
     await catalog.publish(_script(), "pessoa-1")
@@ -396,6 +435,17 @@ async def test_scr26_rate_limit_reports_wait_seconds():
         await catalog.get(NAME)
 
     assert str(exc.value) == "Limite da Store atingido; tente em 7 s"
+
+
+@pytest.mark.asyncio
+async def test_scr26_rate_limit_without_retry_after_asks_to_retry_shortly():
+    catalog, registry, _ = _catalog()
+    registry.error = AgentRegistryRateLimited(None)
+
+    with pytest.raises(ScriptRuleError) as exc:
+        await catalog.get(NAME)
+
+    assert str(exc.value) == "Limite da Store atingido; tente de novo em instantes"
 
 
 @pytest.mark.asyncio

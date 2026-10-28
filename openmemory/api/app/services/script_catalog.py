@@ -80,7 +80,7 @@ class ScriptCatalog:
 
     async def publish(self, script: ScriptInput, author: str) -> PublishResult:
         try:
-            await anyio.to_thread.run_sync(self._lock_name, script.name)
+            await self._lock_name(script.name)
             items = await self._tag_items(script.name)
             result = await self._apply_new_version(script, author, items)
         except AgentRegistryError as error:
@@ -104,19 +104,23 @@ class ScriptCatalog:
 
     async def rollback(self, name: str, version: str, author: str) -> ScriptView:
         try:
+            await self._lock_name(name)
             source = await self._get_tag(name, version)
             latest = _copy_as_latest(source, version, author)
             await self.client.apply_resource(resource=latest, auth_headers=self.auth_headers)
             items = await self._tag_items(name)
         except AgentRegistryError as error:
             raise _translate_registry_error(error, name, version) from error
+        finally:
+            self.db.rollback()
         logging.info(f"script_rollback name={name} version={version} author={author}")
         return _build_view(latest, items)
 
-    def _lock_name(self, name: str) -> None:
+    async def _lock_name(self, name: str) -> None:
         if self.db.get_bind().dialect.name != "postgresql":
             return
-        self.db.execute(
+        await anyio.to_thread.run_sync(
+            self.db.execute,
             text("SELECT pg_advisory_xact_lock(hashtext(:key))"),
             {"key": f"script_publish:{name}"},
         )
@@ -160,7 +164,9 @@ def _translate_registry_error(error: AgentRegistryError, name: str, version: str
     if error.status_code == 404:
         return ScriptRuleError(f"Script não encontrado: {name}@{version}")
     if error.status_code == 429:
-        return ScriptRuleError(f"Limite da Store atingido; tente em {getattr(error, 'retry_after', None)} s")
+        retry_after = getattr(error, "retry_after", None)
+        wait = f"em {retry_after} s" if retry_after else "de novo em instantes"
+        return ScriptRuleError(f"Limite da Store atingido; tente {wait}")
     if error.status_code == 502:
         return ScriptRuleError("Store indisponível; tente de novo em instantes")
     return ScriptRuleError(error.detail)
