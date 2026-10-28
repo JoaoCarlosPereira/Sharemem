@@ -39,6 +39,7 @@ func init() {
 	register(v1alpha1.KindPlugin, func() *v1alpha1.Plugin { return &v1alpha1.Plugin{} })
 	register(v1alpha1.KindHook, func() *v1alpha1.Hook { return &v1alpha1.Hook{} })
 	register(v1alpha1.KindPrompt, func() *v1alpha1.Prompt { return &v1alpha1.Prompt{} })
+	register(v1alpha1.KindScript, func() *v1alpha1.Script { return &v1alpha1.Script{} })
 	register(v1alpha1.KindRuntime, func() *v1alpha1.Runtime { return &v1alpha1.Runtime{} })
 	register(v1alpha1.KindModel, func() *v1alpha1.Model { return &v1alpha1.Model{} })
 	register(v1alpha1.KindDeployment, func() *v1alpha1.Deployment { return &v1alpha1.Deployment{} })
