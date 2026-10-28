@@ -222,7 +222,9 @@ class TestInstallerWiringHardening:
         # Exatamente uma chamada por fluxo (--update e instalação nova); uma
         # segunda chamada órfã (bug de merge entre duas correções da mesma
         # lacuna) reconstruiria os sidecars duas vezes sem necessidade.
-        assert src.count("ensure_sidecars_after_update(dc") == 3  # def + 2 chamadas
+        # Conta a def + as 2 chamadas; uma delas é multilinha
+        # (``ensure_sidecars_after_update(\n        dc, ...``).
+        assert src.count("ensure_sidecars_after_update(") == 3
         assert "http://127.0.0.1:8080/v0/ping" in src
 
     def test_buildx_checado_nos_dois_fluxos_de_prerequisito(self):

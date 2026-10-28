@@ -86,6 +86,9 @@ def test_put_plugin_json_inline_publica_componentes_e_artefato():
 
 def test_put_plugin_tarball_direto_publica_sem_base64():
     client, registry = app_client()
+    # Reusa o mesmo buffer: gzip embute mtime no header, então duas chamadas
+    # a tar_payload() no mesmo segundo-limite falham em assert de igualdade.
+    archive = tar_payload()
     response = client.put(
         "/api/v1/store/plugins/demo-plugin/latest",
         headers={
@@ -93,10 +96,10 @@ def test_put_plugin_tarball_direto_publica_sem_base64():
             "Content-Type": PLUGIN_ARTIFACT_MEDIA_TYPE,
             "X-Plugin-Metadata": json.dumps(METADATA),
         },
-        content=tar_payload(),
+        content=archive,
     )
     assert response.status_code == 200, response.text
-    assert registry.archive == tar_payload()
+    assert registry.archive == archive
 
 
 def test_marketplace_agrega_plugin_empacotado():
