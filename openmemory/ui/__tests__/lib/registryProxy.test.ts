@@ -19,6 +19,16 @@ describe("registry proxy allowlist", () => {
     ).toBe(true);
   });
 
+  it("permite leitura de scripts e recusa gravação direta", () => {
+    expect(isRegistryProxyPathAllowed("GET", ["v0", "scripts"])).toBe(true);
+    expect(
+      isRegistryProxyPathAllowed("GET", ["v0", "scripts", "gcenfe02-xml", "latest"]),
+    ).toBe(true);
+    expect(
+      isRegistryProxyPathAllowed("DELETE", ["v0", "scripts", "gcenfe02-xml", "latest"]),
+    ).toBe(false);
+  });
+
   it("permite leitura compatível do MCP Registry v0.1", () => {
     expect(isRegistryProxyPathAllowed("GET", ["v0.1", "servers"])).toBe(true);
     expect(

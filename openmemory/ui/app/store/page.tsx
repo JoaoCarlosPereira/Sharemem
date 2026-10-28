@@ -4,7 +4,9 @@ import type { FormEvent, ReactNode } from "react";
 import { useEffect, useMemo, useState } from "react";
 import {
   Bot,
+  Copy,
   Download,
+  FileCode,
   FileText,
   PackagePlus,
   Plug,
@@ -17,6 +19,7 @@ import {
   Webhook,
 } from "lucide-react";
 
+import { copyText } from "@/components/shared/CommandBlock";
 import { PageHeader } from "@/components/shared/PageHeader";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -27,10 +30,14 @@ import { useApiSessionReady } from "@/hooks/useApiSessionReady";
 import { useRegistryCatalog } from "@/hooks/useRegistryCatalog";
 import {
   buildPublishManifest,
+  getStoreScript,
   INSTALL_TARGET_LABELS,
   INSTALL_TARGETS,
+  PUBLISHABLE_RESOURCE_KINDS,
   REGISTRY_KIND_LABELS,
   REGISTRY_RESOURCE_KINDS,
+  registryErrorMessage,
+  scriptListSummary,
   registryDependencySummary,
   registryResourceDescription,
   registryResourceNamespace,
@@ -52,6 +59,7 @@ import {
   type PublishDraft,
   type RegistryResource,
   type RegistryResourceKind,
+  type ScriptView,
 } from "@/lib/registry-client";
 import { cn } from "@/lib/utils";
 
@@ -67,6 +75,7 @@ const KIND_ICONS: Record<RegistryResourceKind, typeof Store> = {
   prompts: FileText,
   agents: Bot,
   plugins: Puzzle,
+  scripts: FileCode,
 };
 
 /** Starting point for the event map, so the shape is obvious in the form. */
@@ -126,6 +135,7 @@ export default function StorePage() {
   const [formErrors, setFormErrors] = useState<string[]>([]);
   const [skillFiles, setSkillFiles] = useState<File[]>([]);
   const [packageMessage, setPackageMessage] = useState<string | null>(null);
+  const [selectedScript, setSelectedScript] = useState<string | null>(null);
 
   useEffect(() => {
     if (!apiSessionReady) return;
@@ -159,11 +169,17 @@ export default function StorePage() {
         prompts: 0,
         agents: 0,
         plugins: 0,
+        scripts: 0,
       },
     );
   }, [resources]);
 
   const handleSelectResource = (resource: RegistryResource) => {
+    if (resource.registryKind === "scripts") {
+      setSelectedScript(resource.metadata.name);
+      return;
+    }
+    setSelectedScript(null);
     void loadDetail(
       resource.registryKind,
       resource.metadata.name,
@@ -374,9 +390,12 @@ export default function StorePage() {
                   key={`${resource.registryKind}:${registryResourceNamespace(resource)}:${resource.metadata.name}:${registryResourceTag(resource)}`}
                   resource={resource}
                   selected={
-                    selectedResource?.registryKind === resource.registryKind &&
-                    selectedResource.metadata.name === resource.metadata.name &&
-                    registryResourceTag(selectedResource) === registryResourceTag(resource)
+                    resource.registryKind === "scripts"
+                      ? selectedScript === resource.metadata.name
+                      : !selectedScript &&
+                        selectedResource?.registryKind === resource.registryKind &&
+                        selectedResource.metadata.name === resource.metadata.name &&
+                        registryResourceTag(selectedResource) === registryResourceTag(resource)
                   }
                   onSelect={() => handleSelectResource(resource)}
                 />
@@ -386,31 +405,35 @@ export default function StorePage() {
         </section>
 
         <aside className="space-y-4">
-          <ResourceDetailCard
-            resource={selectedResource}
-            loading={detailLoading}
-            installTarget={installTarget}
-            installing={installing}
-            installError={installError}
-            installRecipe={installRecipe}
-            onInstallTargetChange={setInstallTarget}
-            onRequestRecipe={() => {
-              if (!selectedResource) return;
-              void requestInstallRecipe(
-                selectedResource.registryKind,
-                selectedResource.metadata.name,
-                registryResourceTag(selectedResource),
-                installTarget,
-              );
-            }}
-            onDownload={() => void handleDownload()}
-            onEdit={() => {
-              if (selectedResource) handleEdit(selectedResource);
-            }}
-            onDelete={() => {
-              if (selectedResource) void handleDelete(selectedResource);
-            }}
-          />
+          {selectedScript ? (
+            <ScriptDetailCard key={selectedScript} name={selectedScript} />
+          ) : (
+            <ResourceDetailCard
+              resource={selectedResource}
+              loading={detailLoading}
+              installTarget={installTarget}
+              installing={installing}
+              installError={installError}
+              installRecipe={installRecipe}
+              onInstallTargetChange={setInstallTarget}
+              onRequestRecipe={() => {
+                if (!selectedResource) return;
+                void requestInstallRecipe(
+                  selectedResource.registryKind,
+                  selectedResource.metadata.name,
+                  registryResourceTag(selectedResource),
+                  installTarget,
+                );
+              }}
+              onDownload={() => void handleDownload()}
+              onEdit={() => {
+                if (selectedResource) handleEdit(selectedResource);
+              }}
+              onDelete={() => {
+                if (selectedResource) void handleDelete(selectedResource);
+              }}
+            />
+          )}
 
           <Card>
             <CardHeader className="pb-3">
@@ -435,7 +458,7 @@ export default function StorePage() {
                       }
                       className="mt-1 h-10 w-full rounded-md border border-slate-700 bg-slate-950 px-3 text-sm text-slate-100"
                     >
-                      {REGISTRY_RESOURCE_KINDS.map((kind) => (
+                      {PUBLISHABLE_RESOURCE_KINDS.map((kind) => (
                         <option key={kind} value={kind}>
                           {REGISTRY_KIND_LABELS[kind]}
                         </option>
@@ -762,6 +785,11 @@ function ResourceCard({
           <p className="mt-1 line-clamp-2 text-sm text-slate-400">
             {registryResourceDescription(resource)}
           </p>
+          {resource.registryKind === "scripts" ? (
+            <p className="mt-2 truncate text-xs text-slate-300">
+              {scriptListSummary(resource).join(" · ")}
+            </p>
+          ) : null}
           <p className="mt-3 truncate font-mono text-xs text-slate-500">
             {registryResourceNamespace(resource)}/{resource.metadata.name}
           </p>
@@ -995,6 +1023,125 @@ function ResourceDetailCard({
             </div>
           ) : null}
         </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function ScriptDetailCard({ name }: { name: string }) {
+  const [version, setVersion] = useState<string | undefined>(undefined);
+  const [script, setScript] = useState<ScriptView | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    setError(null);
+    getStoreScript(name, version)
+      .then((view) => {
+        if (active) setScript(view);
+      })
+      .catch((reason) => {
+        if (active) setError(registryErrorMessage(reason, "Falha ao carregar o script."));
+      });
+    return () => {
+      active = false;
+    };
+  }, [name, version]);
+
+  if (error) {
+    return (
+      <Card>
+        <CardContent role="alert" className="p-6 text-sm text-red-200">
+          {error}
+        </CardContent>
+      </Card>
+    );
+  }
+
+  if (!script) {
+    return (
+      <Card>
+        <CardContent className="p-6 text-sm text-slate-400">Carregando detalhe...</CardContent>
+      </Card>
+    );
+  }
+
+  const { card } = script;
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <CardTitle className="flex items-center gap-2 text-lg text-white">
+          <FileCode className="h-5 w-5 text-blue-400" />
+          Detalhe
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div>
+          <h2 className="text-xl font-bold text-white">{card.title || script.name}</h2>
+          <p className="mt-1 text-sm text-slate-400">{card.description}</p>
+          <p className="mt-2 break-all font-mono text-xs text-slate-500">{script.file_name}</p>
+        </div>
+
+        {script.warning ? (
+          <div role="alert" className="rounded-xl border border-amber-500/30 bg-amber-950/30 p-3 text-sm text-amber-200">
+            {script.warning}
+          </div>
+        ) : null}
+
+        <DetailSection title="Ficha">
+          <li>Linguagem: {card.language}</li>
+          <li>Efeitos: {card.effects.join(", ")}</li>
+          <li>Projeto/área: {card.area}</li>
+          {card.requirements.length ? <li>Requisitos: {card.requirements.join(", ")}</li> : null}
+          {card.tags.length ? <li>Tags: {card.tags.join(", ")}</li> : null}
+          <li>Autor: {card.author ?? "-"}</li>
+          <li>Publicado em: {card.published_at ?? "-"}</li>
+          <li>Downloads (30 dias): {card.downloads_30d ?? "-"}</li>
+          <li className="break-all">sha256: {script.sha256}</li>
+        </DetailSection>
+
+        <div className="space-y-2">
+          <h3 className="text-sm font-semibold uppercase tracking-widest text-slate-500">
+            Exemplo de uso
+          </h3>
+          <pre className="whitespace-pre-wrap break-all rounded-xl border border-slate-800 bg-slate-950 p-3 font-mono text-xs text-slate-200">
+            {card.usage}
+          </pre>
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() => void copyText(card.usage)}
+            className="w-full border-slate-700 bg-slate-900 text-slate-200 hover:bg-slate-800 hover:text-white"
+          >
+            <Copy className="mr-2 h-4 w-4" />
+            Copiar exemplo de uso
+          </Button>
+        </div>
+
+        <label className="block text-sm text-slate-400">
+          Versão
+          <select
+            aria-label="Versão do script"
+            value={script.version ?? ""}
+            onChange={(event) => setVersion(event.target.value)}
+            className="mt-1 h-10 w-full rounded-md border border-slate-700 bg-slate-950 px-3 text-sm text-slate-100"
+          >
+            {script.versions.map((entry) => (
+              <option key={entry.version} value={entry.version}>
+                {entry.version}
+                {entry.is_latest ? " (latest)" : ""}
+                {entry.author ? ` · ${entry.author}` : ""}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <pre
+          aria-label="Código do script"
+          className="max-h-96 overflow-auto rounded-xl border border-slate-800 bg-slate-950 p-3 font-mono text-xs text-slate-200"
+        >
+          {script.content}
+        </pre>
       </CardContent>
     </Card>
   );

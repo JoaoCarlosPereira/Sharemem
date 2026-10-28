@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 
 jest.mock("@/lib/api-client", () => ({
   apiClient: {
@@ -39,6 +39,132 @@ const skill: RegistryResource = {
     },
   },
 };
+
+function scriptResource(tag: string, version: string, updatedAt: string): RegistryResource {
+  return {
+    registryKind: "scripts",
+    kind: "Script",
+    metadata: {
+      namespace: "default",
+      name: "gcenfe02-xml",
+      tag,
+      updatedAt,
+      annotations: { "sharemem.io/versao": version, "sharemem.io/autor": "pessoa-1" },
+    },
+    spec: {
+      description: "Decodifica a coluna GCENFE02.XML",
+      usage: "python gcenfe02_xml.py <arquivo>",
+      fileName: "gcenfe02_xml.py",
+      language: "python",
+      effects: ["somente-leitura"],
+      area: "sysmo-s1",
+      content: `print(${version})\n`,
+    },
+  };
+}
+
+function scriptView(version: string, isLatest: boolean) {
+  return {
+    name: "gcenfe02-xml",
+    version,
+    is_latest: isLatest,
+    file_name: "gcenfe02_xml.py",
+    content: `print('v${version}')\n`,
+    sha256: `sha-${version}`,
+    warning: null,
+    card: {
+      title: null,
+      description: "Decodifica a coluna GCENFE02.XML",
+      usage: "python gcenfe02_xml.py <arquivo>",
+      language: "python",
+      requirements: ["python>=3.8"],
+      effects: ["somente-leitura"],
+      area: "sysmo-s1",
+      tags: ["nfe"],
+      author: "pessoa-1",
+      published_at: "2026-10-27T00:00:00+00:00",
+      downloads_30d: 4,
+    },
+    versions: [
+      { version: "3", author: "pessoa-1", published_at: null, is_latest: true },
+      { version: "1", author: "pessoa-2", published_at: null, is_latest: false },
+    ],
+  };
+}
+
+function mockScriptCatalog() {
+  mockedApiClient.get.mockImplementation((url, config) => {
+    const path = String(url);
+    if (path === "/registry-api/v0/skills") {
+      return Promise.resolve({ data: { items: [skill] } });
+    }
+    if (path === "/registry-api/v0/scripts") {
+      const latest = scriptResource("latest", "3", "2026-10-27T10:00:00Z");
+      const older = scriptResource("1", "1", "2026-10-27T11:00:00Z");
+      const latestOnly = (config as { params?: Record<string, unknown> })?.params?.latestOnly;
+      return Promise.resolve({ data: { items: latestOnly ? [latest] : [latest, older] } });
+    }
+    if (path === "/api-proxy/api/v1/store/scripts/gcenfe02-xml") {
+      return Promise.resolve({ data: scriptView("3", true) });
+    }
+    if (path === "/api-proxy/api/v1/store/scripts/gcenfe02-xml/1") {
+      return Promise.resolve({ data: scriptView("1", false) });
+    }
+    return Promise.resolve({ data: { items: [] } });
+  });
+}
+
+describe("StorePage scripts", () => {
+  beforeEach(() => {
+    mockedApiClient.get.mockReset();
+    mockScriptCatalog();
+  });
+
+  it("filtro Scripts lista só scripts da latest com a ficha resumida", async () => {
+    render(<StorePage />);
+    await screen.findByText("Demo Skill");
+
+    fireEvent.click(within(screen.getByLabelText("Filtros por tipo")).getByRole("button", { name: /^Scripts/ }));
+
+    expect(screen.queryByText("Demo Skill")).not.toBeInTheDocument();
+    const cards = screen.getAllByText("gcenfe02-xml", { selector: "p" });
+    expect(cards).toHaveLength(1);
+    const card = cards[0].closest("button") as HTMLButtonElement;
+    expect(card).toHaveTextContent("Decodifica a coluna GCENFE02.XML");
+    expect(card).toHaveTextContent("python");
+    expect(card).toHaveTextContent("somente-leitura");
+    expect(card).toHaveTextContent("pessoa-1");
+    expect(card).toHaveTextContent("versão 3");
+  });
+
+  it("abrir um script mostra ficha, código da versão escolhida e copia o exemplo", async () => {
+    const writeText = jest.fn().mockResolvedValue(undefined);
+    Object.assign(navigator, { clipboard: { writeText } });
+    render(<StorePage />);
+    await screen.findByText("Demo Skill");
+    fireEvent.click(within(screen.getByLabelText("Filtros por tipo")).getByRole("button", { name: /^Scripts/ }));
+
+    fireEvent.click(screen.getAllByText("gcenfe02-xml", { selector: "p" })[0].closest("button") as HTMLButtonElement);
+
+    const code = await screen.findByLabelText("Código do script");
+    expect(code).toHaveTextContent("print('v3')");
+    expect(screen.getByText("python gcenfe02_xml.py <arquivo>")).toBeInTheDocument();
+    expect(screen.getByText(/sysmo-s1/)).toBeInTheDocument();
+    expect(screen.getByText(/python>=3.8/)).toBeInTheDocument();
+    expect(screen.getByText(/Downloads \(30 dias\): 4/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /Copiar exemplo de uso/i }));
+    expect(writeText).toHaveBeenCalledWith("python gcenfe02_xml.py <arquivo>");
+
+    fireEvent.change(screen.getByLabelText("Versão do script"), { target: { value: "1" } });
+    await waitFor(() => {
+      expect(screen.getByLabelText("Código do script")).toHaveTextContent("print('v1')");
+    });
+    expect(mockedApiClient.get).toHaveBeenCalledWith(
+      "/api-proxy/api/v1/store/scripts/gcenfe02-xml/1",
+    );
+  });
+});
 
 describe("StorePage", () => {
   beforeEach(() => {

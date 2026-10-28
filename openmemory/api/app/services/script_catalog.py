@@ -206,14 +206,14 @@ class ScriptCatalog:
 
 def _translate_registry_error(error: AgentRegistryError, name: str, version: str) -> ScriptRuleError:
     if error.status_code == 404:
-        return ScriptRuleError(f"Script não encontrado: {name}@{version}")
+        return ScriptRuleError(f"Script não encontrado: {name}@{version}", 404)
     if error.status_code == 429:
         retry_after = getattr(error, "retry_after", None)
         wait = f"em {retry_after} s" if retry_after else "de novo em instantes"
-        return ScriptRuleError(f"Limite da Store atingido; tente {wait}")
+        return ScriptRuleError(f"Limite da Store atingido; tente {wait}", 429)
     if error.status_code == 502:
-        return ScriptRuleError("Store indisponível; tente de novo em instantes")
-    return ScriptRuleError(error.detail)
+        return ScriptRuleError("Store indisponível; tente de novo em instantes", 502)
+    return ScriptRuleError(error.detail, error.status_code)
 
 
 def _now() -> str:
