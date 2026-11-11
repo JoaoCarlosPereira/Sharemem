@@ -23,6 +23,7 @@ MAX_SEARCH_LIMIT = 100
 
 KIND_TO_REGISTRY_COLLECTION: dict[str, str] = {
     "agent": "agents",
+    "app": "localapps",
     "hook": "hooks",
     "mcpserver": "mcpservers",
     "plugin": "plugins",
@@ -34,6 +35,7 @@ KIND_TO_REGISTRY_COLLECTION: dict[str, str] = {
 REGISTRY_KIND_TO_CATALOG_KIND: dict[str, str] = {
     "Agent": "agent",
     "Hook": "hook",
+    "LocalApp": "app",
     "MCPServer": "mcpserver",
     "Plugin": "plugin",
     "Prompt": "prompt",
@@ -47,6 +49,7 @@ PACKAGE_MEDIA_TYPES: dict[str, str] = {
     "skill": "application/vnd.agentregistry.skill.v1.tar+gzip",
     "hook": "application/vnd.agentregistry.hook.v1.tar+gzip",
     "plugin": "application/vnd.agentregistry.plugin.v1.tar+gzip",
+    "app": "application/vnd.agentregistry.localapp.v1.tar+gzip",
 }
 
 
@@ -470,6 +473,20 @@ def summarize_resource(resource: dict[str, Any]) -> dict[str, Any]:
             tags=spec.get("tags") or [],
             author=annotations.get("sharemem.io/autor"),
             version=annotations.get("sharemem.io/versao"),
+        )
+    if kind == "app":
+        summary.update(
+            usage=spec.get("usage"),
+            requirements=spec.get("requirements") or [],
+            effects=spec.get("effects") or [],
+            area=spec.get("area"),
+            tags=spec.get("tags") or [],
+            author=annotations.get("sharemem.io/autor"),
+            version=annotations.get("sharemem.io/versao"),
+            settings=[
+                {"name": item.get("name"), "required": item.get("required", True), "secret": item.get("secret", False)}
+                for item in spec.get("settings") or []
+            ],
         )
     return summary
 
