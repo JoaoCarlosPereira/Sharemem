@@ -12,6 +12,8 @@ import re
 from typing import Any, Literal, Optional, Protocol, TypedDict
 from urllib.parse import quote
 
+from app.services.app_packages import COMMAND_PATTERN, IDENTIFIER_PATTERN, WHEEL_FILE_PATTERN, is_home_file
+from app.services.catalog_versions import SHA256_KEY, VERSION_KEY
 from app.utils.agentregistry import (
     KIND_TO_REGISTRY_COLLECTION,
     AgentRegistryError,
@@ -19,7 +21,7 @@ from app.utils.agentregistry import (
     AgentRegistryResourceNotFound,
 )
 
-CatalogKind = Literal["skill", "hook", "mcpserver", "prompt", "agent", "plugin"]
+CatalogKind = Literal["skill", "hook", "mcpserver", "prompt", "agent", "plugin", "app"]
 InstallTarget = Literal["cursor", "claude", "codex"]
 
 RECIPE_VERSION = "1"
@@ -27,6 +29,13 @@ RECIPE_VERSION = "1"
 SKILL_ARTIFACT_MEDIA_TYPE = "application/vnd.agentregistry.skill.v1.tar+gzip"
 HOOK_ARTIFACT_MEDIA_TYPE = "application/vnd.agentregistry.hook.v1.tar+gzip"
 PLUGIN_ARTIFACT_MEDIA_TYPE = "application/vnd.agentregistry.plugin.v1.tar+gzip"
+APP_ARTIFACT_MEDIA_TYPE = "application/vnd.agentregistry.localapp.v1.tar+gzip"
+
+PACKAGE_ROUTES: dict[str, tuple[str, str]] = {
+    "skill": ("skills", SKILL_ARTIFACT_MEDIA_TYPE),
+    "hook": ("hooks", HOOK_ARTIFACT_MEDIA_TYPE),
+    "app": ("apps", APP_ARTIFACT_MEDIA_TYPE),
+}
 
 # Placeholder a hook command uses to reach a file shipped in its own package.
 # The host expands it to the directory the package was extracted into, which is
@@ -40,10 +49,11 @@ STORE_API_PREFIX = "/api/v1/store"
 # Gravado na pasta do pacote: diz ao atualizador-store o que veio da Store, em
 # qual digest, e (para hooks) com quais eventos. Pasta sem ele nunca é tocada.
 STORE_MARKER_FILE = ".sharemem-store.json"
-STORE_MARKER_KINDS = frozenset({"skill", "hook"})
+STORE_MARKER_KINDS = frozenset({"skill", "hook", "app"})
 
 TARGET_DESTINATIONS: dict[str, dict[str, str]] = {
     "cursor": {
+        "app": "~/.sharemem/apps/{name}",
         "agent": ".cursor/agents/{name}.json",
         "mcpserver": ".cursor/mcp.json",
         "plugin": ".cursor/plugins/{name}",
@@ -51,6 +61,7 @@ TARGET_DESTINATIONS: dict[str, dict[str, str]] = {
         "skill": ".cursor/skills/{name}",
     },
     "claude": {
+        "app": "~/.sharemem/apps/{name}",
         "agent": "~/.claude/agents/{name}.json",
         "hook": "~/.claude/settings.json",
         "mcpserver": ".mcp.json",
@@ -59,6 +70,7 @@ TARGET_DESTINATIONS: dict[str, dict[str, str]] = {
         "skill": "~/.claude/skills/{name}",
     },
     "codex": {
+        "app": "~/.sharemem/apps/{name}",
         "agent": "~/.codex/agents/{name}.json",
         "mcpserver": "~/.codex/config.toml",
         "plugin": "~/.codex/plugins/{name}",
@@ -157,9 +169,20 @@ class InstallRecipeService:
             steps = _mcp_steps(safe_target, safe_name, destination, spec, source)
         elif safe_kind == "hook":
             steps = _hook_steps(safe_target, safe_name, destination, spec, source)
+        elif safe_kind == "app":
+            steps = _app_steps(safe_name, destination, spec, source)
         else:
             steps = _file_steps(safe_kind, safe_name, destination, source, spec)
-        steps = _with_store_marker(steps, safe_kind, safe_name, safe_tag, safe_target, source, spec)
+        steps = _with_store_marker(
+            steps,
+            safe_kind,
+            safe_name,
+            safe_tag,
+            safe_target,
+            source,
+            spec,
+            metadata.get("annotations") if isinstance(metadata.get("annotations"), dict) else {},
+        )
 
         return {
             "version": RECIPE_VERSION,
@@ -183,7 +206,9 @@ class InstallRecipeService:
             },
             "source": source,
             "steps": steps,
-            "rollback": _rollback_steps(
+            "rollback": []
+            if safe_kind == "app"
+            else _rollback_steps(
                 destination,
                 _hook_package_destination(safe_target, safe_name) if safe_kind == "hook" else None,
             ),
@@ -247,6 +272,7 @@ def _destination(kind: str, target: str, name: str) -> str:
 def _registry_kind_name(kind: str) -> str:
     return {
         "agent": "Agent",
+        "app": "LocalApp",
         "hook": "Hook",
         "mcpserver": "MCPServer",
         "plugin": "Plugin",
@@ -268,19 +294,18 @@ def _resolve_source(kind: str, resource: dict[str, Any], spec: dict[str, Any]) -
     # Skills published as complete packages are self-contained. Prefer the
     # immutable AgentRegistry artifact even if an older metadata record still
     # carries a Git repository for provenance.
-    if kind in ("skill", "hook"):
+    if kind in PACKAGE_ROUTES:
         resolved_artifact = resolved.get("artifact")
         if isinstance(resolved_artifact, dict) and resolved_artifact.get("digest"):
-            default_media_type = (
-                SKILL_ARTIFACT_MEDIA_TYPE if kind == "skill" else HOOK_ARTIFACT_MEDIA_TYPE
-            )
-            collection = "skills" if kind == "skill" else "hooks"
+            collection, default_media_type = PACKAGE_ROUTES[kind]
+            pinned_version = annotations.get(VERSION_KEY) if kind == "app" else None
+            route_tag = str(pinned_version or metadata.get("tag") or "latest")
             return {
                 "type": "registry_artifact",
                 "media_type": resolved_artifact.get("mediaType") or default_media_type,
                 "artifact_digest": resolved_artifact.get("digest"),
                 "size": resolved_artifact.get("size"),
-                "endpoint": f"{STORE_API_PREFIX}/{collection}/{quote(str(metadata.get('name') or kind), safe='')}/{quote(str(metadata.get('tag') or 'latest'), safe='')}/artifact",
+                "endpoint": f"{STORE_API_PREFIX}/{collection}/{quote(str(metadata.get('name') or kind), safe='')}/{quote(route_tag, safe='')}/artifact",
             }
 
     repository = _first_dict(
@@ -399,9 +424,10 @@ def _with_store_marker(
     target: str,
     source: dict[str, Any],
     spec: dict[str, Any],
+    annotations: Optional[dict[str, Any]] = None,
 ) -> list[dict[str, Any]]:
     """Insere, logo após a extração, o marcador lido pelo atualizador-store."""
-    if target != "claude" or kind not in STORE_MARKER_KINDS:
+    if kind not in STORE_MARKER_KINDS or (kind != "app" and target != "claude"):
         return steps
     if source.get("type") != "registry_artifact":
         return steps
@@ -419,14 +445,24 @@ def _with_store_marker(
     }
     if kind == "hook":
         marker["eventos"] = spec.get("events")
+    marker_dir = steps[index]["to"]
+    marker_description = (
+        "Grave content em path sem alterar. É o registro do que foi instalado: nome, versão e sha256."
+        if kind == "app"
+        else (
+            "Grave content em path sem alterar. É o registro que permite ao "
+            "atualizador-store atualizar este pacote sozinho."
+        )
+    )
+    if kind == "app":
+        marker["version"] = (annotations or {}).get(VERSION_KEY)
+        marker["sha256"] = (annotations or {}).get(SHA256_KEY)
+        marker_dir = marker_dir.rsplit("/", 1)[0]
     marker_step = {
         "id": "write-store-marker",
         "type": "write_file",
-        "description": (
-            "Grave content em path sem alterar. É o registro que permite ao "
-            "atualizador-store atualizar este pacote sozinho."
-        ),
-        "path": f"{steps[index]['to']}/{STORE_MARKER_FILE}",
+        "description": marker_description,
+        "path": f"{marker_dir}/{STORE_MARKER_FILE}",
         "content": json.dumps(marker, ensure_ascii=False, indent=2) + "\n",
         "overwrite": True,
         "idempotent": True,
@@ -553,6 +589,174 @@ def _hook_steps(
         }
     )
     return steps
+
+
+def _app_command(value: Any, field_name: str) -> tuple[str, str]:
+    if not isinstance(value, str) or not COMMAND_PATTERN.fullmatch(value):
+        raise InstallRecipeValidationError(f"comando {field_name} do aplicativo inválido")
+    executable, _, arguments = value.partition(" ")
+    return executable, arguments
+
+
+def _app_identifier(value: Any, field_name: str) -> str:
+    if not isinstance(value, str) or not IDENTIFIER_PATTERN.fullmatch(value):
+        raise InstallRecipeValidationError(f"configuração do aplicativo com {field_name} inválido")
+    return value
+
+
+def _setting_check_commands(env: Optional[str], file: Optional[str], key: Optional[str]) -> dict[str, str]:
+    windows: list[str] = []
+    linux_macos: list[str] = []
+    if env:
+        windows.append(f"Test-Path env:{env}")
+        linux_macos.append(f'[ -n "${{{env}+x}}" ]')
+    if file and key:
+        windows_file = file.replace("/", "\\")
+        windows.append(f"Select-String -Quiet -Pattern '^{key}=' -Path \"$HOME\\{windows_file}\"")
+        linux_macos.append(f"grep -q '^{key}=' \"$HOME/{file}\"")
+    if len(windows) > 1:
+        windows = [f"({command})" for command in windows]
+    return {"windows": " -or ".join(windows), "linux_macos": " || ".join(linux_macos)}
+
+
+def _app_settings(spec: dict[str, Any]) -> list[dict[str, Any]]:
+    settings: list[dict[str, Any]] = []
+    for item in spec.get("settings") or []:
+        if not isinstance(item, dict) or not isinstance(item.get("name"), str):
+            continue
+        entry: dict[str, Any] = {
+            "name": _app_identifier(item["name"], "name"),
+            "description": item.get("description"),
+            "required": item.get("required") is True,
+            "secret": item.get("secret") is True,
+        }
+        env = key = file = None
+        if item.get("env") is not None:
+            env = entry["env"] = _app_identifier(item["env"], "env")
+        if item.get("key") is not None:
+            key = entry["key"] = _app_identifier(item["key"], "key")
+        if item.get("file") is not None:
+            file = item["file"]
+            if not isinstance(file, str) or not is_home_file(file):
+                raise InstallRecipeValidationError("configuração do aplicativo com file inválido")
+            entry["file"] = f"~/{file}"
+        if env or (file and key):
+            entry["commands"] = _setting_check_commands(env, file, key)
+        settings.append({field: value for field, value in entry.items() if value is not None})
+    return settings
+
+
+def _app_steps(
+    name: str,
+    destination: str,
+    spec: dict[str, Any],
+    source: dict[str, Any],
+) -> list[dict[str, Any]]:
+    if source.get("type") != "registry_artifact":
+        raise InstallRecipeValidationError("aplicativo sem artefato publicado")
+    wheel = spec.get("wheel")
+    if not isinstance(wheel, str) or not WHEEL_FILE_PATTERN.fullmatch(wheel):
+        raise InstallRecipeValidationError("wheel do aplicativo inválida")
+    commands = spec.get("commands") if isinstance(spec.get("commands"), dict) else {}
+    start_executable, start_arguments = _app_command(commands.get("start"), "start")
+    verify_executable, verify_arguments = _app_command(commands.get("verify"), "verify")
+
+    win_dir = "$HOME\\" + destination[2:].replace("/", "\\")
+    unix_dir = f"$HOME/{destination[2:]}"
+    win_python = f"{win_dir}\\.venv\\Scripts\\python.exe"
+    unix_python = f"{unix_dir}/.venv/bin/python"
+
+    def venv_command(executable: str, arguments: str) -> dict[str, str]:
+        suffix = f" {arguments}" if arguments else ""
+        return {
+            "windows": f'& "{win_dir}\\.venv\\Scripts\\{executable}.exe"{suffix}',
+            "linux_macos": f'"{unix_dir}/.venv/bin/{executable}"{suffix}',
+        }
+
+    return [
+        {
+            "id": "check-python",
+            "type": "check_python",
+            "description": (
+                "Confira se o Python instalado atende requires_python; se não "
+                "atender, avise o usuário e pare."
+            ),
+            "requires_python": spec.get("pythonRequires"),
+            "commands": {"windows": "python --version", "linux_macos": "python3 --version"},
+        },
+        {
+            "id": "download-and-extract-app-package",
+            "type": "download_and_extract",
+            "description": (
+                "Baixe o artefato em from.endpoint, confira o sha256 e extraia em to "
+                "— é o último pacote baixado, com a wheel."
+            ),
+            "from": source,
+            "to": f"{destination}/pacote",
+            "overwrite": True,
+            "idempotent": True,
+            "verify_artifact_sha256": source.get("artifact_digest"),
+        },
+        {
+            "id": "create-venv",
+            "type": "python_venv",
+            "description": "Crie o ambiente virtual do aplicativo se ele ainda não existir.",
+            "path": f"{destination}/.venv",
+            "commands": {
+                "windows": (
+                    f'if (-not (Test-Path "{win_python}")) '
+                    f'{{ python -m venv "{win_dir}\\.venv" }}'
+                ),
+                "linux_macos": f'[ -x "{unix_python}" ] || python3 -m venv "{unix_dir}/.venv"',
+            },
+            "idempotent": True,
+        },
+        {
+            "id": "pip-install-wheel",
+            "type": "pip_install",
+            "description": (
+                "Instale a wheel no venv do aplicativo; --force-reinstall cobre "
+                "atualização e volta de versão."
+            ),
+            "commands": {
+                "windows": (
+                    f'& "{win_python}" -m pip install --force-reinstall --no-cache-dir '
+                    f'"{win_dir}\\pacote\\{wheel}"'
+                ),
+                "linux_macos": (
+                    f'"{unix_python}" -m pip install --force-reinstall --no-cache-dir '
+                    f'"{unix_dir}/pacote/{wheel}"'
+                ),
+            },
+            "idempotent": True,
+        },
+        {
+            "id": "check-settings",
+            "type": "check_settings",
+            "description": (
+                "Antes do primeiro uso, mostre ao usuário esta lista (name, description, "
+                "required e onde fica: env ou file+key). Para cada item, confira só se "
+                "existe na variável env ou no arquivo file, sem ler nem mostrar o valor; "
+                "item com secret=true nunca tem o conteúdo exibido. Peça ao usuário o "
+                "que faltar."
+            ),
+            "settings": _app_settings(spec),
+        },
+        {
+            "id": "run-verify-command",
+            "type": "run_command",
+            "description": "Rode o comando de verificação do aplicativo e espere saída 0.",
+            "commands": venv_command(verify_executable, verify_arguments),
+            "expect_exit_code": 0,
+        },
+        {
+            "id": "verify-app",
+            "type": "verify",
+            "description": "Entregue ao usuário o comando start e o texto usage.",
+            "start": venv_command(start_executable, start_arguments),
+            "usage": spec.get("usage"),
+        },
+    ]
 
 
 def _mcp_steps(

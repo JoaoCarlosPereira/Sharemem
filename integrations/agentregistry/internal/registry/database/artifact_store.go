@@ -45,6 +45,11 @@ func NewPostgresHookArtifactStore(pool *pgxpool.Pool, schema pkgdb.Schema) *Post
 		artifact.HookMediaTypeTarGzip, artifact.HookRootFile)
 }
 
+func NewPostgresLocalAppArtifactStore(pool *pgxpool.Pool, schema pkgdb.Schema) *PostgresArtifactStore {
+	return newPostgresArtifactStore(pool, schema, "localapp_artifacts", "localapp",
+		artifact.LocalAppMediaTypeTarGzip, artifact.LocalAppRootFile)
+}
+
 // NewPostgresPluginArtifactStore binds the store to the Plugin association
 // table (migration 015).
 func NewPostgresPluginArtifactStore(pool *pgxpool.Pool, schema pkgdb.Schema) *PostgresArtifactStore {

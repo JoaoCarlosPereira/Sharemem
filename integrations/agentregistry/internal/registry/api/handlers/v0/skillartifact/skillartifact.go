@@ -36,7 +36,8 @@ const (
 	// same validated tar.gz shape as Skill packages; only the vendor media
 	// type differs so a client cannot cross-post one kind's bytes to the
 	// other's route.
-	HookMediaType = "application/vnd.agentregistry.hook.v1.tar+gzip"
+	HookMediaType     = "application/vnd.agentregistry.hook.v1.tar+gzip"
+	LocalAppMediaType = "application/vnd.agentregistry.localapp.v1.tar+gzip"
 )
 
 type Config struct {
@@ -81,22 +82,33 @@ type artifactInput struct {
 }
 
 type putArtifactInput struct {
-	Namespace string `query:"namespace" doc:"Namespace (defaults to 'default')."`
-	Name      string `path:"name"`
-	Tag       string `path:"tag"`
-	Digest    string `header:"Digest" doc:"Optional RFC 3230 SHA-256 digest (sha-256=<base64>)."`
-	RawBody   []byte `contentType:"application/vnd.agentregistry.skill.v1.tar+gzip"`
+	Namespace   string `query:"namespace" doc:"Namespace (defaults to 'default')."`
+	Name        string `path:"name"`
+	Tag         string `path:"tag"`
+	Digest      string `header:"Digest" doc:"Optional RFC 3230 SHA-256 digest (sha-256=<base64>)."`
+	ContentType string `header:"Content-Type"`
+	RawBody     []byte `contentType:"application/vnd.agentregistry.skill.v1.tar+gzip"`
 }
 
 // putHookArtifactInput mirrors putArtifactInput for the Hook media type. The
 // raw-body content type is a struct tag Huma reads at registration, so it
 // cannot come from Config — one input type per media type is required.
 type putHookArtifactInput struct {
-	Namespace string `query:"namespace" doc:"Namespace (defaults to 'default')."`
-	Name      string `path:"name"`
-	Tag       string `path:"tag"`
-	Digest    string `header:"Digest" doc:"Optional RFC 3230 SHA-256 digest (sha-256=<base64>)."`
-	RawBody   []byte `contentType:"application/vnd.agentregistry.hook.v1.tar+gzip"`
+	Namespace   string `query:"namespace" doc:"Namespace (defaults to 'default')."`
+	Name        string `path:"name"`
+	Tag         string `path:"tag"`
+	Digest      string `header:"Digest" doc:"Optional RFC 3230 SHA-256 digest (sha-256=<base64>)."`
+	ContentType string `header:"Content-Type"`
+	RawBody     []byte `contentType:"application/vnd.agentregistry.hook.v1.tar+gzip"`
+}
+
+type putLocalAppArtifactInput struct {
+	Namespace   string `query:"namespace" doc:"Namespace (defaults to 'default')."`
+	Name        string `path:"name"`
+	Tag         string `path:"tag"`
+	Digest      string `header:"Digest" doc:"Optional RFC 3230 SHA-256 digest (sha-256=<base64>)."`
+	ContentType string `header:"Content-Type"`
+	RawBody     []byte `contentType:"application/vnd.agentregistry.localapp.v1.tar+gzip"`
 }
 
 type putArtifactOutput struct {
@@ -122,15 +134,21 @@ func Register(api huma.API, cfg Config) {
 	}
 	// One registration per media type: the raw-body content type is a struct
 	// tag Huma reads off the input type at registration time.
-	if cfg.MediaType == HookMediaType {
+	switch cfg.MediaType {
+	case HookMediaType:
 		huma.Register(api, putOperation,
 			func(ctx context.Context, in *putHookArtifactInput) (*putArtifactOutput, error) {
-				return putArtifact(ctx, cfg, in.Namespace, in.Name, in.Tag, in.Digest, in.RawBody)
+				return putArtifact(ctx, cfg, in.Namespace, in.Name, in.Tag, in.Digest, in.ContentType, in.RawBody)
 			})
-	} else {
+	case LocalAppMediaType:
+		huma.Register(api, putOperation,
+			func(ctx context.Context, in *putLocalAppArtifactInput) (*putArtifactOutput, error) {
+				return putArtifact(ctx, cfg, in.Namespace, in.Name, in.Tag, in.Digest, in.ContentType, in.RawBody)
+			})
+	default:
 		huma.Register(api, putOperation,
 			func(ctx context.Context, in *putArtifactInput) (*putArtifactOutput, error) {
-				return putArtifact(ctx, cfg, in.Namespace, in.Name, in.Tag, in.Digest, in.RawBody)
+				return putArtifact(ctx, cfg, in.Namespace, in.Name, in.Tag, in.Digest, in.ContentType, in.RawBody)
 			})
 	}
 
@@ -248,7 +266,7 @@ func Register(api huma.API, cfg Config) {
 func putArtifact(
 	ctx context.Context,
 	cfg Config,
-	namespace, name, tag, digestHeaderValue string,
+	namespace, name, tag, digestHeaderValue, contentType string,
 	body []byte,
 ) (*putArtifactOutput, error) {
 	key, err := resolveKey(namespace, name, tag)
@@ -262,6 +280,9 @@ func putArtifact(
 		}); err != nil {
 			return nil, err
 		}
+	}
+	if mediaType, _, err := mime.ParseMediaType(contentType); err != nil || mediaType != cfg.MediaType {
+		return nil, huma.Error415UnsupportedMediaType("Content-Type must be " + cfg.MediaType)
 	}
 	if len(body) == 0 {
 		return nil, huma.Error422UnprocessableEntity("artifact body must not be empty")

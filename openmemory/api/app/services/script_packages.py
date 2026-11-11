@@ -70,9 +70,7 @@ class ScriptInput(BaseModel):
     @field_validator("name")
     @classmethod
     def validate_name(cls, value: str) -> str:
-        if len(value) not in NAME_LENGTH or not NAME_PATTERN.match(value):
-            raise ScriptRuleError("Nome inválido")
-        return value
+        return check_name(value, ScriptRuleError)
 
     @field_validator("file_name")
     @classmethod
@@ -85,9 +83,7 @@ class ScriptInput(BaseModel):
     @field_validator("description")
     @classmethod
     def validate_description(cls, value: str) -> str:
-        if len(value) > MAX_DESCRIPTION_CHARS:
-            raise ScriptRuleError("Descrição acima de 4.000 caracteres")
-        return value
+        return check_description(value, ScriptRuleError)
 
     @field_validator("content", mode="before")
     @classmethod
@@ -103,6 +99,18 @@ class ScriptInput(BaseModel):
         if line is not None:
             raise ScriptRuleError(f"Script contém credencial na linha {line}")
         return text
+
+
+def check_name(value: str, error: type[ScriptRuleError]) -> str:
+    if len(value) not in NAME_LENGTH or not NAME_PATTERN.fullmatch(value):
+        raise error("Nome inválido")
+    return value
+
+
+def check_description(value: str, error: type[ScriptRuleError]) -> str:
+    if len(value) > MAX_DESCRIPTION_CHARS:
+        raise error("Descrição acima de 4.000 caracteres")
+    return value
 
 
 def find_credential_line(content: str) -> int | None:

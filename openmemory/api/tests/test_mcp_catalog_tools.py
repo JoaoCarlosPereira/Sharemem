@@ -518,3 +518,190 @@ async def test_authenticated_mcp_tool_call_forwards_authorization_header(monkeyp
     body = json.loads(result_text)
     assert body["results"][0]["name"] == "team-skill"
     assert fake.calls[-1][1]["auth_headers"] == {"Authorization": "Bearer omtk_token"}
+
+
+@pytest.mark.asyncio
+async def test_app03_search_without_kind_lists_apps_latest_only(monkeypatch):
+    fake = FakeCatalogClient()
+    monkeypatch.setattr(mcp_server, "get_agent_registry_client", lambda: fake)
+
+    await mcp_server.search_catalog(query="nada-casa-isto")
+
+    app_call = next(call[1] for call in fake.calls if call[1]["kind"] == "app")
+    assert app_call["latest_only"] is True
+    assert next(call[1] for call in fake.calls if call[1]["kind"] == "script")["latest_only"] is True
+    assert next(call[1] for call in fake.calls if call[1]["kind"] == "skill")["latest_only"] is False
+
+
+@pytest.mark.asyncio
+async def test_app03_search_app_kind_returns_card_with_settings_and_latest_only(monkeypatch):
+    fake = FakeCatalogClient()
+    fake.items = [_app_resource()]
+    monkeypatch.setattr(mcp_server, "get_agent_registry_client", lambda: fake)
+
+    out = await mcp_server.search_catalog(query="horas", kind="app")
+
+    body = json.loads(out)
+    assert fake.calls[0][1]["kind"] == "app"
+    assert fake.calls[0][1]["latest_only"] is True
+    assert [item["name"] for item in body["results"]] == ["horas-app"]
+    assert body["results"][0]["kind"] == "app"
+    assert body["results"][0]["settings"] == [
+        {"name": "REDMINE_URL", "required": True, "secret": False},
+        {"name": "REDMINE_API_KEY", "required": True, "secret": True},
+    ]
+
+
+def test_app03_search_catalog_description_mentions_app():
+    description = mcp_server.mcp._tool_manager.get_tool("search_catalog").description
+    assert "plugin|script|app" in description
+
+
+def test_app02_get_install_recipe_description_mentions_app():
+    description = mcp_server.mcp._tool_manager.get_tool("get_install_recipe").description
+    assert "kind=app" in description
+    assert "~/.sharemem/apps/<name>" in description
+
+
+def _app_resource(name="horas-app"):
+    return {
+        "apiVersion": "ar.dev/v1alpha1",
+        "kind": "LocalApp",
+        "metadata": {
+            "namespace": "default",
+            "name": name,
+            "tag": "latest",
+            "annotations": {"sharemem.io/autor": "pessoa-1", "sharemem.io/versao": "2"},
+        },
+        "spec": {
+            "description": "Controle de horas local",
+            "usage": "horas-app",
+            "effects": ["acessa-rede"],
+            "area": "redmine",
+            "tags": ["horas"],
+            "settings": [
+                {"name": "REDMINE_URL", "required": True, "secret": False},
+                {"name": "REDMINE_API_KEY", "required": True, "secret": True},
+            ],
+        },
+    }
+
+
+def _app_view(version="1"):
+    from app.services.app_catalog import AppCard, AppVersion, AppView
+    from app.services.app_packages import AppCommands, AppSetting
+
+    return AppView(
+        name="horas-app",
+        version=version,
+        is_latest=True,
+        sha256="b" * 64,
+        wheel_name="horas_app-0.1.0-py3-none-any.whl",
+        python_requires=">=3.11",
+        card=AppCard(
+            title=None,
+            description="Controle de horas local",
+            usage="horas-app",
+            requirements=[],
+            effects=["acessa-rede"],
+            area="redmine",
+            tags=[],
+            author="pessoa-1",
+            published_at="2026-11-10T00:00:00+00:00",
+        ),
+        commands=AppCommands(start="horas-app", verify="horas-app verificar"),
+        settings=[AppSetting(name="REDMINE_URL", description="d", required=True, secret=False, env="REDMINE_URL")],
+        versions=[AppVersion(version=version, author="pessoa-1", published_at=None, is_latest=True)],
+    )
+
+
+class FakeAppCatalog:
+    instances = []
+    error = None
+
+    def __init__(self, client, db, auth_headers):
+        self.client = client
+        self.db = db
+        self.auth_headers = auth_headers
+        self.calls = []
+        FakeAppCatalog.instances.append(self)
+
+    async def rollback(self, name, version, author):
+        self.calls.append(("rollback", name, version, author))
+        if FakeAppCatalog.error:
+            raise FakeAppCatalog.error
+        return _app_view(version)
+
+
+@pytest.fixture
+def app_catalog(monkeypatch):
+    from app.services import app_catalog as catalog_module
+
+    FakeAppCatalog.instances = []
+    FakeAppCatalog.error = None
+    monkeypatch.setattr(catalog_module, "AppCatalog", FakeAppCatalog)
+    monkeypatch.setattr(mcp_server, "get_agent_registry_client", lambda: FakeCatalogClient())
+    token_auth = mcp_server.registry_auth_headers_var.set({"Authorization": "Bearer omtk_token"})
+    token_user = mcp_server.auth_user_var.set("person-1")
+    yield FakeAppCatalog
+    mcp_server.auth_user_var.reset(token_user)
+    mcp_server.registry_auth_headers_var.reset(token_auth)
+
+
+@pytest.mark.asyncio
+async def test_app01_rollback_app_requires_confirmation_without_calling_service(app_catalog):
+    out = await mcp_server.rollback_app(name="horas-app", version="1")
+
+    assert out.startswith("Error: ")
+    assert "confirm_user_requested=true" in out
+    assert app_catalog.instances == []
+
+
+@pytest.mark.asyncio
+async def test_app01_rollback_app_returns_app_view_with_latest_on_version(app_catalog):
+    out = await mcp_server.rollback_app(name="horas-app", version="1", confirm_user_requested=True)
+
+    body = json.loads(out)
+    assert body == _app_view("1").model_dump()
+    assert body["version"] == "1"
+    assert body["is_latest"] is True
+    service = app_catalog.instances[0]
+    assert service.calls == [("rollback", "horas-app", "1", "person-1")]
+    assert service.auth_headers == {"Authorization": "Bearer omtk_token"}
+
+
+@pytest.mark.asyncio
+async def test_app01_rollback_app_rule_error_becomes_error_message(app_catalog):
+    from app.services.app_packages import AppRuleError
+
+    app_catalog.error = AppRuleError("Aplicativo não encontrado: horas-app@9")
+
+    out = await mcp_server.rollback_app(name="horas-app", version="9", confirm_user_requested=True)
+
+    assert out == "Error: Aplicativo não encontrado: horas-app@9"
+
+
+@pytest.mark.asyncio
+async def test_app01_rollback_app_unexpected_error_is_logged_and_returned(app_catalog, caplog):
+    app_catalog.error = RuntimeError("falha inesperada")
+
+    out = await mcp_server.rollback_app(name="horas-app", version="1", confirm_user_requested=True)
+
+    assert out == "Error: falha inesperada"
+    assert any(record.levelname == "ERROR" for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_app03_search_app_settings_without_flags_in_registry_format_are_false(monkeypatch):
+    fake = FakeCatalogClient()
+    resource = _app_resource()
+    resource["spec"]["settings"] = [{"name": "OPCIONAL"}, {"name": "SEGREDO", "secret": True}]
+    fake.items = [resource]
+    monkeypatch.setattr(mcp_server, "get_agent_registry_client", lambda: fake)
+
+    body = json.loads(await mcp_server.search_catalog(query="", kind="app"))
+
+    assert body["results"][0]["settings"] == [
+        {"name": "OPCIONAL", "required": False, "secret": False},
+        {"name": "SEGREDO", "required": False, "secret": True},
+    ]

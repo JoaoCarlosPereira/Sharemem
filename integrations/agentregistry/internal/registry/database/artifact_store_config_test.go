@@ -25,4 +25,9 @@ func TestArtifactStoresUseKindSpecificPackageContract(t *testing.T) {
 	if !reflect.DeepEqual(plugin.requiredRootFiles, []string{artifact.PluginRootFile, artifact.PluginReadmeFile}) || plugin.mediaType != artifact.PluginMediaTypeTarGzip {
 		t.Fatalf("unexpected Plugin package contract: roots=%q mediaType=%q", plugin.requiredRootFiles, plugin.mediaType)
 	}
+
+	localApp := NewPostgresLocalAppArtifactStore(nil, schema)
+	if !reflect.DeepEqual(localApp.requiredRootFiles, []string{"APP.md"}) || localApp.mediaType != "application/vnd.agentregistry.localapp.v1.tar+gzip" {
+		t.Fatalf("unexpected LocalApp package contract: roots=%q mediaType=%q", localApp.requiredRootFiles, localApp.mediaType)
+	}
 }
