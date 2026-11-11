@@ -18,10 +18,56 @@ import {
   registryResourceSearchText,
   registrySourceSummary,
   validatePublishDraft,
+  fetchInstallRecipe,
+  getStoreApp,
+  REGISTRY_KIND_API_KIND,
   type RegistryResource,
 } from "@/lib/registry-client";
 
 const mockedApiClient = apiClient as jest.Mocked<typeof apiClient>;
+
+describe("registry-client aplicativos", () => {
+  beforeEach(() => {
+    mockedApiClient.get.mockReset();
+    mockedApiClient.post.mockReset();
+  });
+
+  it("mapeia localapps para o kind LocalApp", () => {
+    expect(REGISTRY_KIND_API_KIND.localapps).toBe("LocalApp");
+  });
+
+  it("getStoreApp lê a latest pelo nome codificado", async () => {
+    mockedApiClient.get.mockResolvedValueOnce({ data: { name: "horas app/x" } });
+
+    const view = await getStoreApp("horas app/x");
+
+    expect(mockedApiClient.get).toHaveBeenCalledWith("/api-proxy/api/v1/store/apps/horas%20app%2Fx");
+    expect(view).toEqual({ name: "horas app/x" });
+  });
+
+  it("getStoreApp lê uma versão com nome e versão codificados", async () => {
+    mockedApiClient.get.mockResolvedValueOnce({ data: {} });
+
+    await getStoreApp("horas app/x", "1/2");
+
+    expect(mockedApiClient.get).toHaveBeenCalledWith(
+      "/api-proxy/api/v1/store/apps/horas%20app%2Fx/1%2F2",
+    );
+  });
+
+  it("a receita de instalação de localapps pede o kind app", async () => {
+    mockedApiClient.post.mockResolvedValueOnce({ data: { steps: [] } });
+
+    await fetchInstallRecipe({ kind: "localapps", name: "horas-app", tag: "latest", target: "cursor" });
+
+    expect(mockedApiClient.post).toHaveBeenCalledWith("/api-proxy/api/v1/store/install-recipes", {
+      kind: "app",
+      name: "horas-app",
+      tag: "latest",
+      target: "cursor",
+    });
+  });
+});
 
 describe("registry-client", () => {
   beforeEach(() => {

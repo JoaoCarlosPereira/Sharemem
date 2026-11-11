@@ -10,6 +10,7 @@ const REGISTRY_CATALOG_RESOURCES = new Set([
   "plugins",
   "models",
   "scripts",
+  "localapps",
 ]);
 const REGISTRY_PACKAGE_RESOURCES = new Set(["skills", "hooks", "plugins"]);
 const REGISTRY_PACKAGE_READ_ENDPOINTS = new Set(["artifact", "download", "files"]);

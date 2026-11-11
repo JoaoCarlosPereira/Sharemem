@@ -29,6 +29,23 @@ describe("registry proxy allowlist", () => {
     ).toBe(false);
   });
 
+  it("permite leitura de aplicativos e recusa gravação direta", () => {
+    expect(isRegistryProxyPathAllowed("GET", ["v0", "localapps"])).toBe(true);
+    expect(
+      isRegistryProxyPathAllowed("GET", ["v0", "localapps", "horas-app", "latest"]),
+    ).toBe(true);
+    expect(
+      isRegistryProxyPathAllowed("GET", ["v0", "localapps", "horas-app", "latest", "artifact"]),
+    ).toBe(false);
+    expect(
+      isRegistryProxyPathAllowed("PUT", ["v0", "localapps", "horas-app", "latest", "artifact"]),
+    ).toBe(false);
+    expect(
+      isRegistryProxyPathAllowed("DELETE", ["v0", "localapps", "horas-app", "latest"]),
+    ).toBe(false);
+    expect(isRegistryProxyPathAllowed("PUT", ["v0", "localapps", "horas-app"])).toBe(false);
+  });
+
   it("permite leitura compatível do MCP Registry v0.1", () => {
     expect(isRegistryProxyPathAllowed("GET", ["v0.1", "servers"])).toBe(true);
     expect(

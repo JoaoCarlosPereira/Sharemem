@@ -30,6 +30,7 @@ import { useApiSessionReady } from "@/hooks/useApiSessionReady";
 import { useRegistryCatalog } from "@/hooks/useRegistryCatalog";
 import {
   buildPublishManifest,
+  getStoreApp,
   getStoreScript,
   INSTALL_TARGET_LABELS,
   INSTALL_TARGETS,
@@ -54,6 +55,8 @@ import {
   publishHookPackage as publishHookPackageRequest,
   publishSkillPackage as publishSkillPackageRequest,
   validatePublishDraft,
+  type AppSetting,
+  type ScriptVersionEntry,
   type InstallRecipe,
   type InstallTarget,
   type PublishDraft,
@@ -76,6 +79,7 @@ const KIND_ICONS: Record<RegistryResourceKind, typeof Store> = {
   agents: Bot,
   plugins: Puzzle,
   scripts: FileCode,
+  localapps: PackagePlus,
 };
 
 /** Starting point for the event map, so the shape is obvious in the form. */
@@ -136,6 +140,7 @@ export default function StorePage() {
   const [skillFiles, setSkillFiles] = useState<File[]>([]);
   const [packageMessage, setPackageMessage] = useState<string | null>(null);
   const [selectedScript, setSelectedScript] = useState<string | null>(null);
+  const [selectedApp, setSelectedApp] = useState<string | null>(null);
 
   useEffect(() => {
     if (!apiSessionReady) return;
@@ -170,16 +175,24 @@ export default function StorePage() {
         agents: 0,
         plugins: 0,
         scripts: 0,
+        localapps: 0,
       },
     );
   }, [resources]);
 
   const handleSelectResource = (resource: RegistryResource) => {
     if (resource.registryKind === "scripts") {
+      setSelectedApp(null);
       setSelectedScript(resource.metadata.name);
       return;
     }
+    if (resource.registryKind === "localapps") {
+      setSelectedScript(null);
+      setSelectedApp(resource.metadata.name);
+      return;
+    }
     setSelectedScript(null);
+    setSelectedApp(null);
     void loadDetail(
       resource.registryKind,
       resource.metadata.name,
@@ -392,7 +405,10 @@ export default function StorePage() {
                   selected={
                     resource.registryKind === "scripts"
                       ? selectedScript === resource.metadata.name
-                      : !selectedScript &&
+                      : resource.registryKind === "localapps"
+                        ? selectedApp === resource.metadata.name
+                        : !selectedScript &&
+                        !selectedApp &&
                         selectedResource?.registryKind === resource.registryKind &&
                         selectedResource.metadata.name === resource.metadata.name &&
                         registryResourceTag(selectedResource) === registryResourceTag(resource)
@@ -407,6 +423,8 @@ export default function StorePage() {
         <aside className="space-y-4">
           {selectedScript ? (
             <ScriptDetailCard key={selectedScript} name={selectedScript} />
+          ) : selectedApp ? (
+            <AppDetailCard key={selectedApp} name={selectedApp} />
           ) : (
             <ResourceDetailCard
               resource={selectedResource}
@@ -785,7 +803,7 @@ function ResourceCard({
           <p className="mt-1 line-clamp-2 text-sm text-slate-400">
             {registryResourceDescription(resource)}
           </p>
-          {resource.registryKind === "scripts" ? (
+          {resource.registryKind === "scripts" || resource.registryKind === "localapps" ? (
             <p className="mt-2 truncate text-xs text-slate-300">
               {scriptListSummary(resource).join(" · ")}
             </p>
@@ -1028,26 +1046,34 @@ function ResourceDetailCard({
   );
 }
 
-function ScriptDetailCard({ name }: { name: string }) {
+function useStoreDetail<T>(
+  load: (name: string, version?: string) => Promise<T>,
+  name: string,
+  failureMessage: string,
+) {
   const [version, setVersion] = useState<string | undefined>(undefined);
-  const [script, setScript] = useState<ScriptView | null>(null);
+  const [view, setView] = useState<T | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let active = true;
     setError(null);
-    getStoreScript(name, version)
-      .then((view) => {
-        if (active) setScript(view);
+    load(name, version)
+      .then((loaded) => {
+        if (active) setView(loaded);
       })
       .catch((reason) => {
-        if (active) setError(registryErrorMessage(reason, "Falha ao carregar o script."));
+        if (active) setError(registryErrorMessage(reason, failureMessage));
       });
     return () => {
       active = false;
     };
-  }, [name, version]);
+  }, [load, name, version, failureMessage]);
 
+  return { view, error, setVersion };
+}
+
+function DetailFallback({ error }: { error: string | null }) {
   if (error) {
     return (
       <Card>
@@ -1057,14 +1083,53 @@ function ScriptDetailCard({ name }: { name: string }) {
       </Card>
     );
   }
+  return (
+    <Card>
+      <CardContent className="p-6 text-sm text-slate-400">Carregando detalhe...</CardContent>
+    </Card>
+  );
+}
 
-  if (!script) {
-    return (
-      <Card>
-        <CardContent className="p-6 text-sm text-slate-400">Carregando detalhe...</CardContent>
-      </Card>
-    );
-  }
+function VersionSelect({
+  label,
+  current,
+  versions,
+  onChange,
+}: {
+  label: string;
+  current: string | null;
+  versions: ScriptVersionEntry[];
+  onChange: (version: string) => void;
+}) {
+  return (
+    <label className="block text-sm text-slate-400">
+      Versão
+      <select
+        aria-label={label}
+        value={current ?? ""}
+        onChange={(event) => onChange(event.target.value)}
+        className="mt-1 h-10 w-full rounded-md border border-slate-700 bg-slate-950 px-3 text-sm text-slate-100"
+      >
+        {versions.map((entry) => (
+          <option key={entry.version} value={entry.version}>
+            {entry.version}
+            {entry.is_latest ? " (latest)" : ""}
+            {entry.author ? ` · ${entry.author}` : ""}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
+function ScriptDetailCard({ name }: { name: string }) {
+  const { view: script, error, setVersion } = useStoreDetail(
+    getStoreScript,
+    name,
+    "Falha ao carregar o script.",
+  );
+
+  if (error || !script) return <DetailFallback error={error} />;
 
   const { card } = script;
   return (
@@ -1118,23 +1183,12 @@ function ScriptDetailCard({ name }: { name: string }) {
           </Button>
         </div>
 
-        <label className="block text-sm text-slate-400">
-          Versão
-          <select
-            aria-label="Versão do script"
-            value={script.version ?? ""}
-            onChange={(event) => setVersion(event.target.value)}
-            className="mt-1 h-10 w-full rounded-md border border-slate-700 bg-slate-950 px-3 text-sm text-slate-100"
-          >
-            {script.versions.map((entry) => (
-              <option key={entry.version} value={entry.version}>
-                {entry.version}
-                {entry.is_latest ? " (latest)" : ""}
-                {entry.author ? ` · ${entry.author}` : ""}
-              </option>
-            ))}
-          </select>
-        </label>
+        <VersionSelect
+          label="Versão do script"
+          current={script.version}
+          versions={script.versions}
+          onChange={setVersion}
+        />
 
         <pre
           aria-label="Código do script"
@@ -1142,6 +1196,94 @@ function ScriptDetailCard({ name }: { name: string }) {
         >
           {script.content}
         </pre>
+      </CardContent>
+    </Card>
+  );
+}
+
+function appSettingLocation(setting: AppSetting): string {
+  if (setting.env) return `variável de ambiente ${setting.env}`;
+  if (setting.file) {
+    return `arquivo ${setting.file}${setting.key ? ` (chave ${setting.key})` : ""}`;
+  }
+  return "-";
+}
+
+function AppDetailCard({ name }: { name: string }) {
+  const { view: app, error, setVersion } = useStoreDetail(
+    getStoreApp,
+    name,
+    "Falha ao carregar o aplicativo.",
+  );
+
+  if (error || !app) return <DetailFallback error={error} />;
+
+  const { card } = app;
+  return (
+    <Card role="region" aria-label="Detalhe do aplicativo">
+      <CardHeader className="pb-3">
+        <CardTitle className="flex items-center gap-2 text-lg text-white">
+          <PackagePlus className="h-5 w-5 text-blue-400" />
+          Detalhe
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div>
+          <h2 className="text-xl font-bold text-white">{card.title || app.name}</h2>
+          <p className="mt-1 text-sm text-slate-400">{card.description}</p>
+          <p className="mt-2 break-all font-mono text-xs text-slate-500">{app.wheel_name}</p>
+        </div>
+
+        <DetailSection title="Ficha">
+          <li>Efeitos: {card.effects.join(", ")}</li>
+          <li>Projeto/área: {card.area}</li>
+          <li>Python: {app.python_requires}</li>
+          {card.requirements.length ? <li>Requisitos: {card.requirements.join(", ")}</li> : null}
+          {card.tags.length ? <li>Tags: {card.tags.join(", ")}</li> : null}
+          <li>Iniciar: {app.commands.start}</li>
+          <li>Verificar: {app.commands.verify}</li>
+          <li>Autor: {card.author ?? "-"}</li>
+          <li>Publicado em: {card.published_at ?? "-"}</li>
+          <li className="break-all">sha256: {app.sha256}</li>
+        </DetailSection>
+
+        <div className="space-y-2">
+          <h3 className="text-sm font-semibold uppercase tracking-widest text-slate-500">
+            O que precisa configurar
+          </h3>
+          {app.settings.length ? (
+            <ul className="space-y-2 text-sm text-slate-300">
+              {app.settings.map((setting) => (
+                <li key={setting.name} className="rounded-xl border border-slate-800 bg-slate-950 p-3">
+                  <span className="font-mono text-slate-100">{setting.name}</span>
+                  <p className="text-slate-400">{setting.description}</p>
+                  <p className="text-xs text-slate-300">
+                    Obrigatório: {setting.required ? "sim" : "não"} · Segredo:{" "}
+                    {setting.secret ? "sim" : "não"} · Onde fica: {appSettingLocation(setting)}
+                  </p>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="text-sm text-slate-400">Nenhuma configuração necessária.</p>
+          )}
+        </div>
+
+        <VersionSelect
+          label="Versão do aplicativo"
+          current={app.version}
+          versions={app.versions}
+          onChange={setVersion}
+        />
+
+        <div className="space-y-2">
+          <h3 className="text-sm font-semibold uppercase tracking-widest text-slate-500">
+            Como instalar
+          </h3>
+          <pre className="whitespace-pre-wrap break-all rounded-xl border border-slate-800 bg-slate-950 p-3 font-mono text-xs text-slate-200">
+            {`peça ao agente para instalar o app ${app.name}`}
+          </pre>
+        </div>
       </CardContent>
     </Card>
   );

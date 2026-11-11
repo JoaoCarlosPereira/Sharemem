@@ -10,12 +10,13 @@ export const REGISTRY_RESOURCE_KINDS = [
   "agents",
   "plugins",
   "scripts",
+  "localapps",
 ] as const;
 
 export type RegistryResourceKind = (typeof REGISTRY_RESOURCE_KINDS)[number];
 
 export const PUBLISHABLE_RESOURCE_KINDS = REGISTRY_RESOURCE_KINDS.filter(
-  (kind) => kind !== "scripts",
+  (kind) => kind !== "scripts" && kind !== "localapps",
 );
 
 export const REGISTRY_KIND_LABELS: Record<RegistryResourceKind, string> = {
@@ -26,6 +27,7 @@ export const REGISTRY_KIND_LABELS: Record<RegistryResourceKind, string> = {
   agents: "Agents",
   plugins: "Plugins",
   scripts: "Scripts",
+  localapps: "Aplicativos",
 };
 
 export const REGISTRY_KIND_API_KIND: Record<RegistryResourceKind, string> = {
@@ -36,6 +38,7 @@ export const REGISTRY_KIND_API_KIND: Record<RegistryResourceKind, string> = {
   agents: "Agent",
   plugins: "Plugin",
   scripts: "Script",
+  localapps: "LocalApp",
 };
 
 export const SCRIPT_VERSION_ANNOTATION = "sharemem.io/versao";
@@ -69,6 +72,39 @@ export interface ScriptView {
     published_at: string | null;
     downloads_30d: number | null;
   };
+  versions: ScriptVersionEntry[];
+}
+
+export interface AppSetting {
+  name: string;
+  description: string;
+  required: boolean;
+  secret: boolean;
+  env?: string | null;
+  file?: string | null;
+  key?: string | null;
+}
+
+export interface AppView {
+  name: string;
+  version: string | null;
+  is_latest: boolean;
+  sha256: string;
+  wheel_name: string;
+  python_requires: string;
+  card: {
+    title: string | null;
+    description: string;
+    usage: string;
+    requirements: string[];
+    effects: string[];
+    area: string;
+    tags: string[];
+    author: string | null;
+    published_at: string | null;
+  };
+  commands: { start: string; verify: string };
+  settings: AppSetting[];
   versions: ScriptVersionEntry[];
 }
 
@@ -159,7 +195,7 @@ export async function listRegistryResources(
       params: {
         namespace: "all",
         limit: 100,
-        ...(kind === "scripts" ? { latestOnly: true } : {}),
+        ...(kind === "scripts" || kind === "localapps" ? { latestOnly: true } : {}),
       },
     },
   );
@@ -172,6 +208,13 @@ export async function getStoreScript(name: string, version?: string): Promise<Sc
   const segments = ["/api-proxy/api/v1/store/scripts", encodeURIComponent(name)];
   if (version) segments.push(encodeURIComponent(version));
   const response = await apiClient.get<ScriptView>(segments.join("/"));
+  return response.data;
+}
+
+export async function getStoreApp(name: string, version?: string): Promise<AppView> {
+  const segments = ["/api-proxy/api/v1/store/apps", encodeURIComponent(name)];
+  if (version) segments.push(encodeURIComponent(version));
+  const response = await apiClient.get<AppView>(segments.join("/"));
   return response.data;
 }
 
@@ -281,6 +324,7 @@ const REGISTRY_KIND_TO_RECIPE_KIND: Record<RegistryResourceKind, string> = {
   agents: "agent",
   plugins: "plugin",
   scripts: "script",
+  localapps: "app",
 };
 
 export async function fetchInstallRecipe(input: {
