@@ -36,7 +36,8 @@ const (
 	// same validated tar.gz shape as Skill packages; only the vendor media
 	// type differs so a client cannot cross-post one kind's bytes to the
 	// other's route.
-	HookMediaType = "application/vnd.agentregistry.hook.v1.tar+gzip"
+	HookMediaType     = "application/vnd.agentregistry.hook.v1.tar+gzip"
+	LocalAppMediaType = "application/vnd.agentregistry.localapp.v1.tar+gzip"
 )
 
 type Config struct {

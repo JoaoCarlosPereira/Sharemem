@@ -31,6 +31,7 @@ const (
 	KindHook       = "Hook"
 	KindPrompt     = "Prompt"
 	KindScript     = "Script"
+	KindLocalApp   = "LocalApp"
 	KindDeployment = "Deployment"
 	KindRuntime    = "Runtime"
 	KindModel      = "Model"

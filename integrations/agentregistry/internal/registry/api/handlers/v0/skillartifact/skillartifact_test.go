@@ -186,3 +186,8 @@ func TestDownloadSkillPackageReturnsCompleteZip(t *testing.T) {
 	assert.Contains(t, resp.Header().Get("Content-Disposition"), "demo-v1.zip")
 	assert.Greater(t, len(resp.Body.Bytes()), 0)
 }
+
+func TestLocalAppMediaTypeMatchesTheArtifactContract(t *testing.T) {
+	assert.Equal(t, "application/vnd.agentregistry.localapp.v1.tar+gzip", skillartifact.LocalAppMediaType)
+	assert.Equal(t, artifact.LocalAppMediaTypeTarGzip, skillartifact.LocalAppMediaType)
+}

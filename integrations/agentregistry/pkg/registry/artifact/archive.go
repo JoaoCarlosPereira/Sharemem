@@ -18,14 +18,16 @@ import (
 )
 
 const (
-	MediaTypeTarGzip       = "application/vnd.agentregistry.skill.v1.tar+gzip"
-	HookMediaTypeTarGzip   = "application/vnd.agentregistry.hook.v1.tar+gzip"
-	PluginMediaTypeTarGzip = "application/vnd.agentregistry.plugin.v1.tar+gzip"
+	MediaTypeTarGzip         = "application/vnd.agentregistry.skill.v1.tar+gzip"
+	HookMediaTypeTarGzip     = "application/vnd.agentregistry.hook.v1.tar+gzip"
+	PluginMediaTypeTarGzip   = "application/vnd.agentregistry.plugin.v1.tar+gzip"
+	LocalAppMediaTypeTarGzip = "application/vnd.agentregistry.localapp.v1.tar+gzip"
 
 	// Root files each package kind must carry. A Hook package has the same
 	// tar.gz shape as a Skill package but is described by HOOK.md.
 	SkillRootFile    = "SKILL.md"
 	HookRootFile     = "HOOK.md"
+	LocalAppRootFile = "APP.md"
 	PluginRootFile   = ".claude-plugin/plugin.json"
 	PluginReadmeFile = "README.md"
 

@@ -308,6 +308,19 @@ func (s *Script) UnmarshalStatus(data json.RawMessage) error {
 	return UnmarshalStatusFromStorage(data, &s.Status)
 }
 
+func (a *LocalApp) GetMetadata() *ObjectMeta { return &a.Metadata }
+func (a *LocalApp) SetMetadata(meta ObjectMeta) {
+	a.Metadata = meta
+}
+func (a *LocalApp) MarshalSpec() (json.RawMessage, error) { return json.Marshal(a.Spec) }
+func (a *LocalApp) UnmarshalSpec(data json.RawMessage) error {
+	return json.Unmarshal(data, &a.Spec)
+}
+func (a *LocalApp) MarshalStatus() (json.RawMessage, error) { return MarshalStatusForStorage(a.Status) }
+func (a *LocalApp) UnmarshalStatus(data json.RawMessage) error {
+	return UnmarshalStatusFromStorage(data, &a.Status)
+}
+
 func (r *Runtime) GetMetadata() *ObjectMeta { return &r.Metadata }
 func (r *Runtime) SetMetadata(meta ObjectMeta) {
 	r.Metadata = meta

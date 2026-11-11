@@ -95,6 +95,30 @@ func TestValidatePackageUsesTheKindRootFile(t *testing.T) {
 	}
 }
 
+func TestValidatePackageAcceptsLocalAppRootFile(t *testing.T) {
+	app := rawArchive(t,
+		tar.Header{Name: "APP.md", Mode: 0o644, Size: 5, Typeflag: tar.TypeReg}, []byte("# App"),
+		tar.Header{Name: "horas_app-1.0.0-py3-none-any.whl", Mode: 0o644, Size: 2, Typeflag: tar.TypeReg}, []byte("PK"),
+	)
+	files, err := ValidatePackage(app, LocalAppRootFile)
+	if err != nil {
+		t.Fatalf("localapp package with APP.md must validate: %v", err)
+	}
+	if len(files) != 2 || files[0].Path != "APP.md" {
+		t.Fatalf("unexpected files: %+v", files)
+	}
+
+	withoutRoot := rawArchive(t,
+		tar.Header{Name: "horas_app-1.0.0-py3-none-any.whl", Mode: 0o644, Size: 2, Typeflag: tar.TypeReg}, []byte("PK"),
+	)
+	if _, err := ValidatePackage(withoutRoot, LocalAppRootFile); !errors.Is(err, ErrInvalidArchive) {
+		t.Fatalf("localapp package without APP.md must be refused, got %v", err)
+	}
+	if LocalAppMediaTypeTarGzip != "application/vnd.agentregistry.localapp.v1.tar+gzip" {
+		t.Fatalf("unexpected localapp media type: %s", LocalAppMediaTypeTarGzip)
+	}
+}
+
 func TestValidatePackageIgnoresDirectoryNamedLikeTheRootFile(t *testing.T) {
 	archive := rawArchive(t,
 		tar.Header{Name: "HOOK.md/", Mode: 0o755, Typeflag: tar.TypeDir}, []byte(nil),
