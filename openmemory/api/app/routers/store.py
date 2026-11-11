@@ -19,14 +19,17 @@ from app.services.store_recipes import (
     StoreRecipeError,
 )
 from app.database import get_db
+from app.services.app_catalog import AppCatalog, AppView
+from app.services.app_packages import AppInput, AppRuleError
+from app.services.catalog_versions import PublishResult
 from app.services.hook_packages import HookPackageInput
 from app.services.script_catalog import ScriptCatalog, ScriptView
 from app.services.script_packages import ScriptRuleError
 from app.services.plugin_packages import PluginPackageInput, PluginPackageMetadata
-from app.services.skill_packages import SkillPackageInput
-from app.utils.agentregistry import AgentRegistryHttpClient, AgentRegistryError
+from app.services.skill_packages import MAX_FILE_BYTES, SkillPackageInput
+from app.utils.agentregistry import PACKAGE_MEDIA_TYPES, AgentRegistryHttpClient, AgentRegistryError
 from app.utils.logging_context import auth_method_var, auth_user_var, team_var
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import Response
 from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy.orm import Session
@@ -478,6 +481,66 @@ async def get_store_script(
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
 
+@router.put("/apps/{name}")
+async def publish_store_app(
+    name: str,
+    request: Request,
+    card: Optional[str] = Form(None),
+    wheel: Optional[UploadFile] = File(None),
+    client: AgentRegistryHttpClient = Depends(get_registry_client),
+    db: Session = Depends(get_db),
+) -> PublishResult:
+    actor = _current_actor_id()
+    try:
+        package = await _app_from_upload(name, card, wheel)
+        catalog = AppCatalog(client, db, _registry_auth_headers(request))
+        return await catalog.publish(package, actor)
+    except AppRuleError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    except ValidationError as exc:
+        detail = "; ".join(
+            f"{'.'.join(str(part) for part in error['loc'])}: {error['msg']}" for error in exc.errors()
+        )
+        raise HTTPException(status_code=422, detail=detail) from exc
+
+
+@router.get("/apps/{name}")
+@router.get("/apps/{name}/{version}")
+async def get_store_app(
+    name: str,
+    request: Request,
+    version: Optional[str] = None,
+    client: AgentRegistryHttpClient = Depends(get_registry_client),
+    db: Session = Depends(get_db),
+) -> AppView:
+    catalog = AppCatalog(client, db, _registry_auth_headers(request))
+    try:
+        return await catalog.get(name, version)
+    except AppRuleError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@router.get("/apps/{name}/{version}/artifact")
+async def download_store_app_artifact(
+    name: str,
+    version: str,
+    request: Request,
+    client: AgentRegistryHttpClient = Depends(get_registry_client),
+    db: Session = Depends(get_db),
+) -> Response:
+    catalog = AppCatalog(client, db, _registry_auth_headers(request))
+    try:
+        data = await catalog.read_artifact(name, version)
+    except AppRuleError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    return _artifact_response(
+        data=data,
+        headers={},
+        filename=f"{name}-{version}.tar.gz",
+        media_type=PACKAGE_MEDIA_TYPES["app"],
+    )
+
+
 @router.put("/plugins/{name:path}/{tag}")
 async def publish_plugin_package(
     name: str,
@@ -667,6 +730,24 @@ async def _package_file_inventory(
             if not info.is_dir()
         ]
     return {"name": name, "tag": tag, "sha256": hashlib.sha256(data).hexdigest(), "files": files}
+
+
+async def _app_from_upload(name: str, card: Optional[str], wheel: Optional[UploadFile]) -> AppInput:
+    if card is None:
+        raise AppRuleError("Campo obrigatório ausente: card")
+    if wheel is None:
+        raise AppRuleError("Campo obrigatório ausente: wheel")
+    try:
+        fields = json.loads(card)
+    except json.JSONDecodeError as exc:
+        raise AppRuleError("A ficha (card) deve ser um JSON válido") from exc
+    if not isinstance(fields, dict):
+        raise AppRuleError("A ficha (card) deve ser um objeto JSON")
+    content = await wheel.read(MAX_FILE_BYTES + 1)
+    package = AppInput.from_upload(fields, wheel.filename, content)
+    if package.name != name:
+        raise AppRuleError("Nome da URL diferente do nome da ficha")
+    return package
 
 
 def _artifact_response(
