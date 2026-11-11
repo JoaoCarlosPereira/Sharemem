@@ -180,6 +180,18 @@ func App(ctx context.Context, opts ...types.AppOptions) error {
 			})
 		})
 	}
+	var localAppArtifacts types.SkillArtifactStore
+	if pool != nil {
+		sch := pkgdb.OSSSchemaRegistry().MustGet(pkgdb.OSSSourceName)
+		localAppArtifacts = internaldb.NewSkillArtifactTransportStore(internaldb.NewPostgresLocalAppArtifactStore(pool, sch), func(ctx context.Context, ref artifact.SkillRef) error {
+			store := stores[v1alpha1.KindLocalApp]
+			if store == nil {
+				return nil
+			}
+			_, err := store.Get(ctx, ref.Namespace, ref.Name, ref.Tag)
+			return err
+		})
+	}
 	controllerConfig := deploymentControllerConfig(cfg)
 	controllerConfig.DependencyKinds = maps.Clone(options.DeploymentDependencyKinds)
 	if _, err := controller.StartDeploymentController(ctx, pool, stores, deploymentAdapters, controllerConfig); err != nil {
@@ -237,6 +249,7 @@ func App(ctx context.Context, opts ...types.AppOptions) error {
 	routeOpts := buildRouteOptions(options, stores, deploymentAdapters, perKindHooks)
 	routeOpts.SkillArtifactStore = skillArtifacts
 	routeOpts.HookArtifactStore = hookArtifacts
+	routeOpts.LocalAppArtifactStore = localAppArtifacts
 
 	// Initialize HTTP server
 	baseServer, err := api.NewServer(cfg, metrics, versionInfo, options.UIHandler, authnProvider, routeOpts, options.OpenAPISchemaNamer)

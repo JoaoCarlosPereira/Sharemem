@@ -33,6 +33,7 @@ func main() {
 			v1alpha1.KindSkill:      catalogAuthorizer,
 			v1alpha1.KindPlugin:     catalogAuthorizer,
 			v1alpha1.KindHook:       catalogAuthorizer,
+			v1alpha1.KindLocalApp:   catalogAuthorizer,
 			v1alpha1.KindPrompt:     catalogAuthorizer,
 			v1alpha1.KindScript:     catalogAuthorizer,
 			v1alpha1.KindModel:      catalogAuthorizer,

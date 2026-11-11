@@ -59,6 +59,8 @@ type RouteOptions struct {
 	// registry boots without the Mem0 Shared artifact tables.
 	HookArtifactStore types.SkillArtifactStore
 
+	LocalAppArtifactStore types.SkillArtifactStore
+
 	// DeploymentLogResolver supports the Deployment logs subresource. Adapter
 	// Apply/Remove side effects are owned by the Deployment controller, not by
 	// CRUD hook wiring.
@@ -146,6 +148,7 @@ func RegisterRoutes(
 		opts.ExtraResourceRoutes,
 		opts.SkillArtifactStore,
 		opts.HookArtifactStore,
+		opts.LocalAppArtifactStore,
 	)
 
 	if opts.ExtraRoutes != nil {
@@ -200,6 +203,7 @@ func registerKindRoutes(
 	extraResourceRoutes func(api huma.API, pathPrefix string, ctx types.ResourceRouteContext),
 	skillArtifacts types.SkillArtifactStore,
 	hookArtifacts types.SkillArtifactStore,
+	localAppArtifacts types.SkillArtifactStore,
 ) resource.ApplyConfig {
 	resolver := internaldb.NewResolver(stores)
 	if resolverWrapper != nil {
@@ -229,6 +233,19 @@ func registerKindRoutes(
 			Label:      v1alpha1.KindHook,
 
 			RequiredRootFiles: []string{artifact.HookRootFile},
+		})
+	}
+	if localAppArtifacts != nil {
+		skillartifact.Register(api, skillartifact.Config{
+			BasePrefix: basePrefix,
+			Store:      localAppArtifacts,
+			Authorize:  perKind.Authorizers[v1alpha1.KindLocalApp],
+			Kind:       v1alpha1.KindLocalApp,
+			Plural:     v1alpha1.PluralFor(v1alpha1.KindLocalApp),
+			MediaType:  skillartifact.LocalAppMediaType,
+			Label:      v1alpha1.KindLocalApp,
+
+			RequiredRootFiles: []string{artifact.LocalAppRootFile},
 		})
 	}
 
