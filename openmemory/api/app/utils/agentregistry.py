@@ -484,7 +484,7 @@ def summarize_resource(resource: dict[str, Any]) -> dict[str, Any]:
             author=annotations.get("sharemem.io/autor"),
             version=annotations.get("sharemem.io/versao"),
             settings=[
-                {"name": item.get("name"), "required": item.get("required", True), "secret": item.get("secret", False)}
+                {"name": item.get("name"), "required": item.get("required") is True, "secret": item.get("secret") is True}
                 for item in spec.get("settings") or []
             ],
         )

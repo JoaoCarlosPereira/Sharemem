@@ -1339,7 +1339,7 @@ def _current_mcp_actor_id() -> str:
     return hostname or "mcp"
 
 
-@mcp.tool(description="Search the internal ShareMem catalog across skills, hooks, MCP servers, prompts, agents, plugins and scripts via AgentRegistry. Safe read-only operation. `query` may be empty to list recent resources; `kind` optionally narrows to skill|hook|mcpserver|prompt|agent|plugin|script. Returns JSON results with summaries and raw resources.")
+@mcp.tool(description="Search the internal ShareMem catalog across skills, hooks, MCP servers, prompts, agents, plugins, scripts and apps via AgentRegistry. Safe read-only operation. `query` may be empty to list recent resources; `kind` optionally narrows to skill|hook|mcpserver|prompt|agent|plugin|script|app. Returns JSON results with summaries and raw resources.")
 async def search_catalog(
     query: str = "",
     kind: str | None = None,
@@ -1366,7 +1366,7 @@ async def search_catalog(
                 kind=catalog_kind,
                 namespace=namespace,
                 limit=safe_limit,
-                latest_only=catalog_kind == "script",
+                latest_only=catalog_kind in ("script", "app"),
                 auth_headers=_registry_auth_headers_for_mcp(),
             )
             items = payload.get("items")
@@ -1619,20 +1619,24 @@ async def delete_skill_package(
         return f"Error: {e}"
 
 
+async def _run_versioned_catalog(catalog_class, rule_error, action) -> str:
+    try:
+        with SessionLocal() as db:
+            catalog = catalog_class(get_agent_registry_client(), db, _registry_auth_headers_for_mcp())
+            result = await action(catalog)
+        return result.model_dump_json()
+    except rule_error as e:
+        return f"Error: {e}"
+    except Exception as e:
+        logging.exception(e)
+        return f"Error: {e}"
+
+
 async def _run_script_catalog(action) -> str:
     from app.services.script_catalog import ScriptCatalog
     from app.services.script_packages import ScriptRuleError
 
-    try:
-        with SessionLocal() as db:
-            catalog = ScriptCatalog(get_agent_registry_client(), db, _registry_auth_headers_for_mcp())
-            result = await action(catalog)
-        return result.model_dump_json()
-    except ScriptRuleError as e:
-        return f"Error: {e}"
-    except Exception as e:  # noqa: BLE001
-        logging.exception(e)
-        return f"Error: {e}"
+    return await _run_versioned_catalog(ScriptCatalog, ScriptRuleError, action)
 
 
 @mcp.tool(description="Publica um Script (arquivo único .py/.sql/.ps1/.sh/.bat/.cmd/.js/.mjs) com a ficha na Store; conteúdo novo vira nova versão. Exige confirm_user_requested=true.")
@@ -1689,6 +1693,22 @@ async def rollback_script(name: str, version: str, confirm_user_requested: bool 
     )
 
 
+async def _run_app_catalog(action) -> str:
+    from app.services.app_catalog import AppCatalog
+    from app.services.app_packages import AppRuleError
+
+    return await _run_versioned_catalog(AppCatalog, AppRuleError, action)
+
+
+@mcp.tool(description="Volta a latest de um Aplicativo para uma versão anterior sem apagar as mais novas. Exige confirm_user_requested=true.")
+async def rollback_app(name: str, version: str, confirm_user_requested: bool = False) -> str:
+    if not confirm_user_requested:
+        return "Error: rollback_app exige pedido explícito do desenvolvedor (confirm_user_requested=true)"
+    return await _run_app_catalog(
+        lambda catalog: catalog.rollback(name, version, _current_mcp_actor_id())
+    )
+
+
 @mcp.tool(description="Marca um Script como obsoleto: sai da busca, mas continua baixável pelo nome com o aviso \"Script obsoleto\". Exige confirm_user_requested=true.")
 async def retire_script(name: str, confirm_user_requested: bool = False) -> str:
     if not confirm_user_requested:
@@ -1696,7 +1716,7 @@ async def retire_script(name: str, confirm_user_requested: bool = False) -> str:
     return await _run_script_catalog(lambda catalog: catalog.retire(name, _current_mcp_actor_id()))
 
 
-@mcp.tool(description="Build a host-applied install recipe for a catalog resource using ShareMem InstallRecipeService. This does not write files itself, but it starts an install workflow; only call after an explicit developer request to install and pass confirm_user_requested=true.")
+@mcp.tool(description="Build a host-applied install recipe for a catalog resource using ShareMem InstallRecipeService. This does not write files itself, but it starts an install workflow; only call after an explicit developer request to install and pass confirm_user_requested=true. For kind=app the recipe installs the Python app in its own venv under ~/.sharemem/apps/<name> and lists the settings the user must configure.")
 async def get_install_recipe(
     kind: str,
     name: str,

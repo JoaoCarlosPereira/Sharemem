@@ -69,9 +69,7 @@ class AppSetting(BaseModel):
             value = getattr(self, field)
             if value is not None and not IDENTIFIER_PATTERN.fullmatch(value):
                 raise AppRuleError(f"Configuração {self.name!r}: {field} deve ser um identificador")
-        if self.file is not None and (
-            not HOME_FILE_PATTERN.fullmatch(self.file) or {".", ".."} & set(self.file.split("/"))
-        ):
+        if self.file is not None and not is_home_file(self.file):
             raise AppRuleError(f"Configuração {self.name}: file deve ser relativo a ~, sem ..")
         if not _single_line(self.description):
             raise AppRuleError(f"Configuração {self.name}: descrição deve ter uma linha só")
@@ -176,6 +174,10 @@ def _read_wheel_metadata(wheel_name: str, wheel: bytes) -> Message:
 def _require_same_name(name: str, wheel_project: str) -> None:
     if _normalize(wheel_project) != name:
         raise AppRuleError(f"O .whl é do projeto {wheel_project}, não de {name}")
+
+
+def is_home_file(value: str) -> bool:
+    return bool(HOME_FILE_PATTERN.fullmatch(value)) and not {".", ".."} & set(value.split("/"))
 
 
 def _single_line(text: str) -> bool:

@@ -409,3 +409,442 @@ async def test_updates_endpoint_limits_batch_size_and_kinds(app):
     assert grande.status_code == 422
     assert plugin.status_code == 422
 
+
+
+APP_DIR_WIN = "$HOME\\.sharemem\\apps\\horas-app"
+APP_DIR_UNIX = "$HOME/.sharemem/apps/horas-app"
+APP_WHEEL = "horas_app-0.1.0-py3-none-any.whl"
+APP_ARTIFACT_DIGEST = "c" * 64
+APP_WHEEL_SHA = "b" * 64
+
+
+def app_resource(**spec_overrides):
+    spec = {
+        "title": "Controle de horas",
+        "description": "Controle de horas local com lançamento no Redmine.",
+        "usage": "Inicie com `horas-app` e confira com `horas-app verificar`.",
+        "wheel": APP_WHEEL,
+        "pythonRequires": ">=3.11",
+        "commands": {"start": "horas-app", "verify": "horas-app verificar"},
+        "settings": [
+            {
+                "name": "REDMINE_URL",
+                "description": "Endereço do Redmine",
+                "required": True,
+                "secret": False,
+                "env": "REDMINE_URL",
+                "file": ".claude/apis/redmine.env",
+                "key": "REDMINE_URL",
+                "value": "https://redmine.exemplo.invalid",
+            },
+            {
+                "name": "REDMINE_API_KEY",
+                "description": "Sua chave de API do Redmine",
+                "required": True,
+                "secret": True,
+                "env": "REDMINE_API_KEY",
+                "file": ".claude/apis/redmine.env",
+                "key": "REDMINE_API_KEY",
+                "value": "segredo-do-planted-123",
+            },
+        ],
+    }
+    spec.update(spec_overrides)
+    return {
+        "apiVersion": "ar.dev/v1alpha1",
+        "kind": "LocalApp",
+        "metadata": {
+            "namespace": "default",
+            "name": "horas-app",
+            "tag": "2",
+            "annotations": {"sharemem.io/versao": "2", "sharemem.io/sha256": APP_WHEEL_SHA},
+        },
+        "spec": spec,
+        "status": {
+            "resolvedSource": {
+                "artifact": {
+                    "digest": APP_ARTIFACT_DIGEST,
+                    "mediaType": "application/vnd.agentregistry.localapp.v1.tar+gzip",
+                    "size": 4321,
+                }
+            }
+        },
+    }
+
+
+async def _app_recipe(resource=None, target="claude"):
+    registry = FakeRegistryClient(resource or app_resource())
+    recipe = await InstallRecipeService(registry_client=registry).build(
+        kind="app", name="horas-app", tag="2", target=target, user_id="user-1"
+    )
+    return recipe, registry
+
+
+def _step(recipe, step_type):
+    return next(step for step in recipe["steps"] if step["type"] == step_type)
+
+
+@pytest.mark.asyncio
+async def test_app02_recipe_has_the_seven_steps_in_techspec_order():
+    recipe, registry = await _app_recipe()
+
+    assert registry.calls[0]["kind"] == "app"
+    assert recipe["resource_kind"] == "app"
+    assert recipe["resource"]["kind"] == "LocalApp"
+    assert [step["type"] for step in recipe["steps"]] == [
+        "check_python",
+        "download_and_extract",
+        "write_file",
+        "python_venv",
+        "pip_install",
+        "check_settings",
+        "run_command",
+        "verify",
+    ]
+    assert [step["id"] for step in recipe["steps"]] == [
+        "check-python",
+        "download-and-extract-app-package",
+        "write-store-marker",
+        "create-venv",
+        "pip-install-wheel",
+        "check-settings",
+        "run-verify-command",
+        "verify-app",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_app02_check_python_carries_requires_python_and_commands():
+    recipe, _ = await _app_recipe()
+
+    step = _step(recipe, "check_python")
+    assert step["requires_python"] == ">=3.11"
+    assert step["commands"] == {"windows": "python --version", "linux_macos": "python3 --version"}
+
+
+@pytest.mark.asyncio
+async def test_app02_download_step_has_artifact_sha_and_public_endpoint():
+    recipe, _ = await _app_recipe()
+
+    step = _step(recipe, "download_and_extract")
+    assert step["verify_artifact_sha256"] == APP_ARTIFACT_DIGEST
+    assert step["to"] == "~/.sharemem/apps/horas-app/pacote"
+    assert step["overwrite"] is True
+    assert step["from"]["endpoint"] == "/api/v1/store/apps/horas-app/2/artifact"
+    assert step["from"]["type"] == "registry_artifact"
+    assert step["from"]["media_type"] == "application/vnd.agentregistry.localapp.v1.tar+gzip"
+    assert recipe["source"] == step["from"]
+
+
+@pytest.mark.asyncio
+async def test_app02_venv_and_pip_steps_have_ready_commands_for_both_systems():
+    recipe, _ = await _app_recipe()
+
+    venv = _step(recipe, "python_venv")
+    assert venv["commands"] == {
+        "windows": (
+            f'if (-not (Test-Path "{APP_DIR_WIN}\\.venv\\Scripts\\python.exe")) '
+            f'{{ python -m venv "{APP_DIR_WIN}\\.venv" }}'
+        ),
+        "linux_macos": (
+            f'[ -x "{APP_DIR_UNIX}/.venv/bin/python" ] || python3 -m venv "{APP_DIR_UNIX}/.venv"'
+        ),
+    }
+    pip = _step(recipe, "pip_install")
+    assert pip["commands"] == {
+        "windows": (
+            f'& "{APP_DIR_WIN}\\.venv\\Scripts\\python.exe" -m pip install '
+            f'--force-reinstall --no-cache-dir "{APP_DIR_WIN}\\pacote\\{APP_WHEEL}"'
+        ),
+        "linux_macos": (
+            f'"{APP_DIR_UNIX}/.venv/bin/python" -m pip install '
+            f'--force-reinstall --no-cache-dir "{APP_DIR_UNIX}/pacote/{APP_WHEEL}"'
+        ),
+    }
+
+
+@pytest.mark.asyncio
+async def test_app02_check_settings_lists_where_each_lives_without_any_value():
+    recipe, _ = await _app_recipe()
+
+    step = _step(recipe, "check_settings")
+    assert step["settings"] == [
+        {
+            "name": "REDMINE_URL",
+            "description": "Endereço do Redmine",
+            "required": True,
+            "secret": False,
+            "env": "REDMINE_URL",
+            "file": "~/.claude/apis/redmine.env",
+            "key": "REDMINE_URL",
+            "commands": _setting_commands("REDMINE_URL"),
+        },
+        {
+            "name": "REDMINE_API_KEY",
+            "description": "Sua chave de API do Redmine",
+            "required": True,
+            "secret": True,
+            "env": "REDMINE_API_KEY",
+            "file": "~/.claude/apis/redmine.env",
+            "key": "REDMINE_API_KEY",
+            "commands": _setting_commands("REDMINE_API_KEY"),
+        },
+    ]
+    payload = json.dumps(recipe)
+    assert "segredo-do-planted-123" not in payload
+    assert "redmine.exemplo.invalid" not in payload
+
+
+@pytest.mark.asyncio
+async def test_app02_check_settings_omits_empty_locations_and_accepts_no_settings():
+    only_env = app_resource(
+        settings=[{"name": "TOKEN_X", "description": "d", "required": False, "secret": True, "env": "TOKEN_X"}]
+    )
+    recipe, _ = await _app_recipe(only_env)
+    assert _step(recipe, "check_settings")["settings"] == [
+        {
+            "name": "TOKEN_X",
+            "description": "d",
+            "required": False,
+            "secret": True,
+            "env": "TOKEN_X",
+            "commands": {"windows": "Test-Path env:TOKEN_X", "linux_macos": '[ -n "${TOKEN_X+x}" ]'},
+        }
+    ]
+
+    recipe, _ = await _app_recipe(app_resource(settings=[]))
+    assert _step(recipe, "check_settings")["settings"] == []
+
+
+@pytest.mark.asyncio
+async def test_app02_run_command_uses_the_venv_executable():
+    recipe, _ = await _app_recipe()
+
+    step = _step(recipe, "run_command")
+    assert step["commands"] == {
+        "windows": f'& "{APP_DIR_WIN}\\.venv\\Scripts\\horas-app.exe" verificar',
+        "linux_macos": f'"{APP_DIR_UNIX}/.venv/bin/horas-app" verificar',
+    }
+    assert step["expect_exit_code"] == 0
+
+
+@pytest.mark.asyncio
+async def test_app02_final_verify_step_delivers_start_and_usage():
+    recipe, _ = await _app_recipe()
+
+    step = _step(recipe, "verify")
+    assert step["start"] == {
+        "windows": f'& "{APP_DIR_WIN}\\.venv\\Scripts\\horas-app.exe"',
+        "linux_macos": f'"{APP_DIR_UNIX}/.venv/bin/horas-app"',
+    }
+    assert step["usage"] == "Inicie com `horas-app` e confira com `horas-app verificar`."
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target", ["claude", "cursor", "codex"])
+async def test_app02_marker_has_name_version_and_sha256_right_after_extract(target):
+    recipe, _ = await _app_recipe(target=target)
+
+    ids = [step["id"] for step in recipe["steps"]]
+    assert ids.index("write-store-marker") == ids.index("download-and-extract-app-package") + 1
+    marker_step = recipe["steps"][ids.index("write-store-marker")]
+    assert marker_step["path"] == "~/.sharemem/apps/horas-app/.sharemem-store.json"
+    assert json.loads(marker_step["content"]) == {
+        "kind": "app",
+        "name": "horas-app",
+        "tag": "2",
+        "digest": APP_ARTIFACT_DIGEST,
+        "version": "2",
+        "sha256": APP_WHEEL_SHA,
+    }
+
+
+@pytest.mark.asyncio
+async def test_app02_recipe_has_no_rollback_steps():
+    recipe, _ = await _app_recipe()
+
+    assert recipe["rollback"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "spec_overrides",
+    [
+        {"commands": {"start": "horas-app", "verify": "horas-app verificar; rm -rf ~"}},
+        {"commands": {"start": "../horas-app", "verify": "horas-app verificar"}},
+        {"commands": {"start": "horas-app", "verify": "C:\\x\\horas-app.exe verificar"}},
+        {"wheel": 'horas_app-0.1.0-py3-none-any.whl"; calc'},
+        {"wheel": "horas_app.zip"},
+        {"wheel": ""},
+    ],
+)
+async def test_app02_unsafe_command_or_wheel_is_rejected(spec_overrides):
+    with pytest.raises(InstallRecipeValidationError):
+        await _app_recipe(app_resource(**spec_overrides))
+
+
+@pytest.mark.asyncio
+async def test_app02_app_without_published_artifact_is_rejected():
+    resource = app_resource()
+    del resource["status"]
+
+    with pytest.raises(InstallRecipeValidationError) as exc_info:
+        await _app_recipe(resource)
+
+    assert exc_info.value.detail == "aplicativo sem artefato publicado"
+
+
+def _setting_commands(name):
+    return {
+        "windows": (
+            f"(Test-Path env:{name}) -or (Select-String -Quiet -Pattern '^{name}=' "
+            f'-Path "$HOME\\.claude\\apis\\redmine.env")'
+        ),
+        "linux_macos": (
+            f'[ -n "${{{name}+x}}" ] || grep -q \'^{name}=\' "$HOME/.claude/apis/redmine.env"'
+        ),
+    }
+
+
+@pytest.mark.asyncio
+async def test_app02_check_settings_in_registry_format_omits_false_flags_as_false():
+    go_format = app_resource(
+        settings=[
+            {"name": "REDMINE_URL", "description": "d", "env": "REDMINE_URL"},
+            {"name": "REDMINE_API_KEY", "description": "d", "secret": True, "env": "REDMINE_API_KEY"},
+        ]
+    )
+    recipe, _ = await _app_recipe(go_format)
+
+    settings = _step(recipe, "check_settings")["settings"]
+    assert [(item["name"], item["required"], item["secret"]) for item in settings] == [
+        ("REDMINE_URL", False, False),
+        ("REDMINE_API_KEY", False, True),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_app02_check_settings_file_only_setting_has_file_command_without_env_clause():
+    resource = app_resource(
+        settings=[
+            {"name": "K", "description": "d", "required": True, "secret": False, "file": "a/b.env", "key": "K"}
+        ]
+    )
+    recipe, _ = await _app_recipe(resource)
+
+    assert _step(recipe, "check_settings")["settings"] == [
+        {
+            "name": "K",
+            "description": "d",
+            "required": True,
+            "secret": False,
+            "key": "K",
+            "file": "~/a/b.env",
+            "commands": {
+                "windows": "Select-String -Quiet -Pattern '^K=' -Path \"$HOME\\a\\b.env\"",
+                "linux_macos": "grep -q '^K=' \"$HOME/a/b.env\"",
+            },
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_app02_check_settings_skips_entries_that_are_not_dicts_or_have_no_name():
+    resource = app_resource(
+        settings=[
+            "texto",
+            None,
+            {"description": "sem nome", "env": "X"},
+            {"name": 7, "env": "X"},
+            {"name": "OK", "description": "d", "required": True, "secret": False, "env": "OK"},
+        ]
+    )
+    recipe, _ = await _app_recipe(resource)
+
+    assert [item["name"] for item in _step(recipe, "check_settings")["settings"]] == ["OK"]
+
+
+@pytest.mark.asyncio
+async def test_app02_check_settings_setting_without_description_omits_the_field():
+    resource = app_resource(settings=[{"name": "OK", "required": True, "secret": False, "env": "OK"}])
+    recipe, _ = await _app_recipe(resource)
+
+    assert _step(recipe, "check_settings")["settings"] == [
+        {
+            "name": "OK",
+            "required": True,
+            "secret": False,
+            "env": "OK",
+            "commands": {"windows": "Test-Path env:OK", "linux_macos": '[ -n "${OK+x}" ]'},
+        }
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "setting",
+    [
+        {"name": "A B", "env": "X"},
+        {"name": "A;rm", "env": "X"},
+        {"name": "OK", "env": "X; calc"},
+        {"name": "OK", "env": "$(x)"},
+        {"name": "OK", "env": "X", "key": "K'; calc; '"},
+        {"name": "OK", "env": ["X"]},
+        {"name": "OK", "env": ""},
+        {"name": "OK", "file": "../x.env", "key": "K"},
+        {"name": "OK", "file": "a/../x.env", "key": "K"},
+        {"name": "OK", "file": "a/./x.env", "key": "K"},
+        {"name": "OK", "file": "/etc/x.env", "key": "K"},
+        {"name": "OK", "file": "a b/x.env", "key": "K"},
+        {"name": "OK", "file": 'a"; calc; ".env', "key": "K"},
+        {"name": "OK", "file": 7, "key": "K"},
+    ],
+)
+async def test_app02_unsafe_setting_name_env_key_or_file_is_rejected(setting):
+    with pytest.raises(InstallRecipeValidationError):
+        await _app_recipe(app_resource(settings=[{"description": "d", "required": True, "secret": False, **setting}]))
+
+
+@pytest.mark.asyncio
+async def test_app02_download_endpoint_uses_immutable_version_even_when_tag_is_latest():
+    resource = app_resource()
+    resource["metadata"]["tag"] = "latest"
+    registry = FakeRegistryClient(resource)
+
+    recipe = await InstallRecipeService(registry_client=registry).build(
+        kind="app", name="horas-app", tag="latest", target="claude", user_id="user-1"
+    )
+
+    assert recipe["source"]["endpoint"] == "/api/v1/store/apps/horas-app/2/artifact"
+    assert _step(recipe, "download_and_extract")["from"]["endpoint"] == "/api/v1/store/apps/horas-app/2/artifact"
+    marker = json.loads(_step(recipe, "write_file")["content"])
+    assert (marker["tag"], marker["version"]) == ("latest", "2")
+
+
+@pytest.mark.asyncio
+async def test_app02_download_endpoint_falls_back_to_tag_without_version_annotation():
+    resource = app_resource()
+    resource["metadata"]["annotations"] = {}
+
+    recipe, _ = await _app_recipe(resource)
+
+    assert recipe["source"]["endpoint"] == "/api/v1/store/apps/horas-app/2/artifact"
+
+
+@pytest.mark.asyncio
+async def test_app02_artifact_without_media_type_uses_the_localapp_default():
+    resource = app_resource()
+    del resource["status"]["resolvedSource"]["artifact"]["mediaType"]
+
+    recipe, _ = await _app_recipe(resource)
+
+    assert recipe["source"]["media_type"] == "application/vnd.agentregistry.localapp.v1.tar+gzip"
+
+
+@pytest.mark.asyncio
+async def test_app02_marker_description_does_not_promise_auto_update_for_app():
+    recipe, _ = await _app_recipe()
+
+    description = _step(recipe, "write_file")["description"]
+    assert "atualizador-store" not in description
+    assert "nome, versão e sha256" in description

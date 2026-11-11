@@ -184,6 +184,6 @@ def _build_view(resource: dict[str, Any], items: list[dict[str, Any]]) -> AppVie
             published_at=annotations.get(PUBLISHED_KEY),
         ),
         commands=AppCommands(**(spec.get("commands") or {})),
-        settings=[AppSetting(**item) for item in spec.get("settings") or []],
+        settings=[AppSetting(**{"required": False, "secret": False, **item}) for item in spec.get("settings") or []],
         versions=build_versions(items, latest_version),
     )

@@ -529,3 +529,32 @@ async def test_app01_publish_not_found_reports_latest():
 
     assert str(exc.value) == f"Aplicativo não encontrado: {NAME}@latest"
     assert exc.value.status_code == 404
+
+
+def _strip_false_flags_like_the_go_registry(registry):
+    for resource in registry.store.values():
+        for setting in resource["spec"].get("settings", []):
+            for flag in ("required", "secret"):
+                if setting.get(flag) is False:
+                    del setting[flag]
+
+
+@pytest.mark.asyncio
+async def test_app01_get_and_rollback_accept_settings_without_false_flags_as_stored_by_go():
+    catalog, registry, _ = _catalog()
+    await catalog.publish(_app(), "pessoa-1")
+    await catalog.publish(_app(WHEEL_V2), "pessoa-1")
+    for resource in registry.store.values():
+        resource["spec"]["settings"][1]["required"] = False
+    _strip_false_flags_like_the_go_registry(registry)
+    assert "secret" not in registry.store[(NAME, "1")]["spec"]["settings"][0]
+    assert "required" not in registry.store[(NAME, "1")]["spec"]["settings"][1]
+
+    fetched = await catalog.get(NAME)
+    rolled_back = await catalog.rollback(NAME, "1", "pessoa-2")
+
+    for view in (fetched, rolled_back):
+        assert [(item.name, item.required, item.secret) for item in view.settings] == [
+            ("REDMINE_URL", True, False),
+            ("REDMINE_API_KEY", False, True),
+        ]
