@@ -326,6 +326,25 @@ components:
       required:
       - status
       type: object
+    Hook:
+      additionalProperties: false
+      properties:
+        apiVersion:
+          type: string
+        kind:
+          type: string
+        metadata:
+          $ref: '#/components/schemas/ObjectMeta'
+        spec:
+          $ref: '#/components/schemas/HookSpec'
+        status:
+          $ref: '#/components/schemas/HookStatus'
+      required:
+      - metadata
+      - spec
+      - apiVersion
+      - kind
+      type: object
     HookEntry:
       additionalProperties: false
       properties:
@@ -385,6 +404,54 @@ components:
           type: string
       required:
       - hooks
+      type: object
+    HookResolvedArtifact:
+      additionalProperties: false
+      properties:
+        digest:
+          type: string
+        mediaType:
+          type: string
+        size:
+          format: int64
+          type: integer
+      type: object
+    HookResolvedSource:
+      additionalProperties: false
+      properties:
+        artifact:
+          $ref: '#/components/schemas/HookResolvedArtifact'
+      type: object
+    HookSpec:
+      additionalProperties: false
+      properties:
+        description:
+          type: string
+        events:
+          additionalProperties:
+            items:
+              $ref: '#/components/schemas/HookMatcherGroup'
+            type:
+            - array
+            - "null"
+          type: object
+        language:
+          type: string
+        title:
+          type: string
+      type: object
+    HookStatus:
+      additionalProperties: false
+      properties:
+        conditions:
+          items:
+            $ref: '#/components/schemas/Condition'
+          type:
+          - array
+          - "null"
+        details: {}
+        resolvedSource:
+          $ref: '#/components/schemas/HookResolvedSource'
       type: object
     HooksField:
       additionalProperties: false
@@ -494,6 +561,34 @@ components:
       required:
       - items
       type: object
+    ListOutputHookBody:
+      additionalProperties: false
+      properties:
+        items:
+          items:
+            $ref: '#/components/schemas/Hook'
+          type:
+          - array
+          - "null"
+        nextCursor:
+          type: string
+      required:
+      - items
+      type: object
+    ListOutputLocalAppBody:
+      additionalProperties: false
+      properties:
+        items:
+          items:
+            $ref: '#/components/schemas/LocalApp'
+          type:
+          - array
+          - "null"
+        nextCursor:
+          type: string
+      required:
+      - items
+      type: object
     ListOutputMCPServerBody:
       additionalProperties: false
       properties:
@@ -564,6 +659,20 @@ components:
       required:
       - items
       type: object
+    ListOutputScriptBody:
+      additionalProperties: false
+      properties:
+        items:
+          items:
+            $ref: '#/components/schemas/Script'
+          type:
+          - array
+          - "null"
+        nextCursor:
+          type: string
+      required:
+      - items
+      type: object
     ListOutputSkillBody:
       additionalProperties: false
       properties:
@@ -577,6 +686,136 @@ components:
           type: string
       required:
       - items
+      type: object
+    LocalApp:
+      additionalProperties: false
+      properties:
+        apiVersion:
+          type: string
+        kind:
+          type: string
+        metadata:
+          $ref: '#/components/schemas/ObjectMeta'
+        spec:
+          $ref: '#/components/schemas/LocalAppSpec'
+        status:
+          $ref: '#/components/schemas/LocalAppStatus'
+      required:
+      - metadata
+      - spec
+      - apiVersion
+      - kind
+      type: object
+    LocalAppCommands:
+      additionalProperties: false
+      properties:
+        start:
+          type: string
+        verify:
+          type: string
+      required:
+      - start
+      - verify
+      type: object
+    LocalAppResolvedArtifact:
+      additionalProperties: false
+      properties:
+        digest:
+          type: string
+        mediaType:
+          type: string
+        size:
+          format: int64
+          type: integer
+      type: object
+    LocalAppResolvedSource:
+      additionalProperties: false
+      properties:
+        artifact:
+          $ref: '#/components/schemas/LocalAppResolvedArtifact'
+      type: object
+    LocalAppSetting:
+      additionalProperties: false
+      properties:
+        description:
+          type: string
+        env:
+          type: string
+        file:
+          type: string
+        key:
+          type: string
+        name:
+          type: string
+        required:
+          type: boolean
+        secret:
+          type: boolean
+      required:
+      - name
+      type: object
+    LocalAppSpec:
+      additionalProperties: false
+      properties:
+        area:
+          type: string
+        commands:
+          $ref: '#/components/schemas/LocalAppCommands'
+        description:
+          type: string
+        effects:
+          items:
+            type: string
+          type:
+          - array
+          - "null"
+        pythonRequires:
+          type: string
+        requirements:
+          items:
+            type: string
+          type:
+          - array
+          - "null"
+        settings:
+          items:
+            $ref: '#/components/schemas/LocalAppSetting'
+          type:
+          - array
+          - "null"
+        tags:
+          items:
+            type: string
+          type:
+          - array
+          - "null"
+        title:
+          type: string
+        usage:
+          type: string
+        wheel:
+          type: string
+      required:
+      - description
+      - usage
+      - effects
+      - area
+      - wheel
+      - pythonRequires
+      - commands
+      type: object
+    LocalAppStatus:
+      additionalProperties: false
+      properties:
+        conditions:
+          items:
+            $ref: '#/components/schemas/Condition'
+          type:
+          - array
+          - "null"
+        details: {}
+        resolvedSource:
+          $ref: '#/components/schemas/LocalAppResolvedSource'
       type: object
     MCPArgument:
       additionalProperties: false
@@ -1386,6 +1625,69 @@ components:
       required:
       - type
       type: object
+    Script:
+      additionalProperties: false
+      properties:
+        apiVersion:
+          type: string
+        kind:
+          type: string
+        metadata:
+          $ref: '#/components/schemas/ObjectMeta'
+        spec:
+          $ref: '#/components/schemas/ScriptSpec'
+        status:
+          $ref: '#/components/schemas/Status'
+      required:
+      - metadata
+      - spec
+      - apiVersion
+      - kind
+      type: object
+    ScriptSpec:
+      additionalProperties: false
+      properties:
+        area:
+          type: string
+        content:
+          type: string
+        description:
+          type: string
+        effects:
+          items:
+            type: string
+          type:
+          - array
+          - "null"
+        fileName:
+          type: string
+        language:
+          type: string
+        requirements:
+          items:
+            type: string
+          type:
+          - array
+          - "null"
+        tags:
+          items:
+            type: string
+          type:
+          - array
+          - "null"
+        title:
+          type: string
+        usage:
+          type: string
+      required:
+      - description
+      - usage
+      - fileName
+      - language
+      - effects
+      - area
+      - content
+      type: object
     SecretEnvSource:
       additionalProperties: false
       properties:
@@ -1579,9 +1881,22 @@ components:
       - apiVersion
       - kind
       type: object
+    SkillResolvedArtifact:
+      additionalProperties: false
+      properties:
+        digest:
+          type: string
+        mediaType:
+          type: string
+        size:
+          format: int64
+          type: integer
+      type: object
     SkillResolvedSource:
       additionalProperties: false
       properties:
+        artifact:
+          $ref: '#/components/schemas/SkillResolvedArtifact'
         commit:
           type: string
       type: object
@@ -1595,6 +1910,8 @@ components:
       additionalProperties: false
       properties:
         description:
+          type: string
+        language:
           type: string
         source:
           $ref: '#/components/schemas/SkillSource'
@@ -2248,6 +2565,402 @@ paths:
       summary: Health check
       tags:
       - health
+  /v0/hooks:
+    get:
+      operationId: list-hooks
+      parameters:
+      - description: Namespace (defaults to 'default'; 'all' lists across all namespaces).
+        explode: false
+        in: query
+        name: namespace
+        schema:
+          description: Namespace (defaults to 'default'; 'all' lists across all namespaces).
+          type: string
+      - description: Max items to return (default 50).
+        explode: false
+        in: query
+        name: limit
+        schema:
+          default: 50
+          description: Max items to return (default 50).
+          format: int64
+          type: integer
+      - description: Opaque pagination cursor.
+        explode: false
+        in: query
+        name: cursor
+        schema:
+          description: Opaque pagination cursor.
+          type: string
+      - description: 'Label selector: key=value,key2=value2.'
+        explode: false
+        in: query
+        name: labels
+        schema:
+          description: 'Label selector: key=value,key2=value2.'
+          type: string
+      - description: Restrict the result set to one tag value (tagged artifact kinds
+          only).
+        explode: false
+        in: query
+        name: tag
+        schema:
+          description: Restrict the result set to one tag value (tagged artifact kinds
+            only).
+          type: string
+      - description: Only return the literal latest tag per (namespace, name). Equivalent
+          to tag=latest for tagged kinds.
+        explode: false
+        in: query
+        name: latestOnly
+        schema:
+          description: Only return the literal latest tag per (namespace, name). Equivalent
+            to tag=latest for tagged kinds.
+          type: boolean
+      - description: Include rows with a deletionTimestamp.
+        explode: false
+        in: query
+        name: includeTerminating
+        schema:
+          description: Include rows with a deletionTimestamp.
+          type: boolean
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListOutputHookBody'
+          description: OK
+        default:
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ErrorModel'
+          description: Error
+      summary: List Hook (scoped by ?namespace)
+  /v0/hooks/{name}:
+    get:
+      operationId: get-latest-hook
+      parameters:
+      - description: Namespace (internal; defaults to 'default').
+        explode: false
+        in: query
+        name: namespace
+        schema:
+          description: Namespace (internal; defaults to 'default').
+          type: string
+      - in: path
+        name: name
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Hook'
+          description: OK
+        default:
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ErrorModel'
+          description: Error
+      summary: Get the latest Hook
+  /v0/hooks/{name}/{tag}:
+    delete:
+      operationId: delete-hook
+      parameters:
+      - description: Namespace (internal; defaults to 'default').
+        explode: false
+        in: query
+        name: namespace
+        schema:
+          description: Namespace (internal; defaults to 'default').
+          type: string
+      - in: path
+        name: name
+        required: true
+        schema:
+          type: string
+      - in: path
+        name: tag
+        required: true
+        schema:
+          type: string
+      responses:
+        "204":
+          description: No Content
+        default:
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ErrorModel'
+          description: Error
+      summary: 'Delete a Hook (soft-delete: sets deletionTimestamp)'
+    get:
+      operationId: get-hook
+      parameters:
+      - description: Namespace (internal; defaults to 'default').
+        explode: false
+        in: query
+        name: namespace
+        schema:
+          description: Namespace (internal; defaults to 'default').
+          type: string
+      - in: path
+        name: name
+        required: true
+        schema:
+          type: string
+      - in: path
+        name: tag
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Hook'
+          description: OK
+        default:
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ErrorModel'
+          description: Error
+      summary: Get a Hook by name and tag
+  /v0/hooks/{name}/tags:
+    get:
+      operationId: list-tags-hook
+      parameters:
+      - description: Namespace (internal; defaults to 'default').
+        explode: false
+        in: query
+        name: namespace
+        schema:
+          description: Namespace (internal; defaults to 'default').
+          type: string
+      - in: path
+        name: name
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListOutputHookBody'
+          description: OK
+        default:
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ErrorModel'
+          description: Error
+      summary: List all tags of a Hook
+  /v0/localapps:
+    get:
+      operationId: list-localapps
+      parameters:
+      - description: Namespace (defaults to 'default'; 'all' lists across all namespaces).
+        explode: false
+        in: query
+        name: namespace
+        schema:
+          description: Namespace (defaults to 'default'; 'all' lists across all namespaces).
+          type: string
+      - description: Max items to return (default 50).
+        explode: false
+        in: query
+        name: limit
+        schema:
+          default: 50
+          description: Max items to return (default 50).
+          format: int64
+          type: integer
+      - description: Opaque pagination cursor.
+        explode: false
+        in: query
+        name: cursor
+        schema:
+          description: Opaque pagination cursor.
+          type: string
+      - description: 'Label selector: key=value,key2=value2.'
+        explode: false
+        in: query
+        name: labels
+        schema:
+          description: 'Label selector: key=value,key2=value2.'
+          type: string
+      - description: Restrict the result set to one tag value (tagged artifact kinds
+          only).
+        explode: false
+        in: query
+        name: tag
+        schema:
+          description: Restrict the result set to one tag value (tagged artifact kinds
+            only).
+          type: string
+      - description: Only return the literal latest tag per (namespace, name). Equivalent
+          to tag=latest for tagged kinds.
+        explode: false
+        in: query
+        name: latestOnly
+        schema:
+          description: Only return the literal latest tag per (namespace, name). Equivalent
+            to tag=latest for tagged kinds.
+          type: boolean
+      - description: Include rows with a deletionTimestamp.
+        explode: false
+        in: query
+        name: includeTerminating
+        schema:
+          description: Include rows with a deletionTimestamp.
+          type: boolean
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListOutputLocalAppBody'
+          description: OK
+        default:
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ErrorModel'
+          description: Error
+      summary: List LocalApp (scoped by ?namespace)
+  /v0/localapps/{name}:
+    get:
+      operationId: get-latest-localapp
+      parameters:
+      - description: Namespace (internal; defaults to 'default').
+        explode: false
+        in: query
+        name: namespace
+        schema:
+          description: Namespace (internal; defaults to 'default').
+          type: string
+      - in: path
+        name: name
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LocalApp'
+          description: OK
+        default:
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ErrorModel'
+          description: Error
+      summary: Get the latest LocalApp
+  /v0/localapps/{name}/{tag}:
+    delete:
+      operationId: delete-localapp
+      parameters:
+      - description: Namespace (internal; defaults to 'default').
+        explode: false
+        in: query
+        name: namespace
+        schema:
+          description: Namespace (internal; defaults to 'default').
+          type: string
+      - in: path
+        name: name
+        required: true
+        schema:
+          type: string
+      - in: path
+        name: tag
+        required: true
+        schema:
+          type: string
+      responses:
+        "204":
+          description: No Content
+        default:
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ErrorModel'
+          description: Error
+      summary: 'Delete a LocalApp (soft-delete: sets deletionTimestamp)'
+    get:
+      operationId: get-localapp
+      parameters:
+      - description: Namespace (internal; defaults to 'default').
+        explode: false
+        in: query
+        name: namespace
+        schema:
+          description: Namespace (internal; defaults to 'default').
+          type: string
+      - in: path
+        name: name
+        required: true
+        schema:
+          type: string
+      - in: path
+        name: tag
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LocalApp'
+          description: OK
+        default:
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ErrorModel'
+          description: Error
+      summary: Get a LocalApp by name and tag
+  /v0/localapps/{name}/tags:
+    get:
+      operationId: list-tags-localapp
+      parameters:
+      - description: Namespace (internal; defaults to 'default').
+        explode: false
+        in: query
+        name: namespace
+        schema:
+          description: Namespace (internal; defaults to 'default').
+          type: string
+      - in: path
+        name: name
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListOutputLocalAppBody'
+          description: OK
+        default:
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ErrorModel'
+          description: Error
+      summary: List all tags of a LocalApp
   /v0/mcpservers:
     get:
       operationId: list-mcpservers
@@ -3222,6 +3935,204 @@ paths:
                 $ref: '#/components/schemas/ErrorModel'
           description: Error
       summary: Apply a Runtime (idempotent upsert)
+  /v0/scripts:
+    get:
+      operationId: list-scripts
+      parameters:
+      - description: Namespace (defaults to 'default'; 'all' lists across all namespaces).
+        explode: false
+        in: query
+        name: namespace
+        schema:
+          description: Namespace (defaults to 'default'; 'all' lists across all namespaces).
+          type: string
+      - description: Max items to return (default 50).
+        explode: false
+        in: query
+        name: limit
+        schema:
+          default: 50
+          description: Max items to return (default 50).
+          format: int64
+          type: integer
+      - description: Opaque pagination cursor.
+        explode: false
+        in: query
+        name: cursor
+        schema:
+          description: Opaque pagination cursor.
+          type: string
+      - description: 'Label selector: key=value,key2=value2.'
+        explode: false
+        in: query
+        name: labels
+        schema:
+          description: 'Label selector: key=value,key2=value2.'
+          type: string
+      - description: Restrict the result set to one tag value (tagged artifact kinds
+          only).
+        explode: false
+        in: query
+        name: tag
+        schema:
+          description: Restrict the result set to one tag value (tagged artifact kinds
+            only).
+          type: string
+      - description: Only return the literal latest tag per (namespace, name). Equivalent
+          to tag=latest for tagged kinds.
+        explode: false
+        in: query
+        name: latestOnly
+        schema:
+          description: Only return the literal latest tag per (namespace, name). Equivalent
+            to tag=latest for tagged kinds.
+          type: boolean
+      - description: Include rows with a deletionTimestamp.
+        explode: false
+        in: query
+        name: includeTerminating
+        schema:
+          description: Include rows with a deletionTimestamp.
+          type: boolean
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListOutputScriptBody'
+          description: OK
+        default:
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ErrorModel'
+          description: Error
+      summary: List Script (scoped by ?namespace)
+  /v0/scripts/{name}:
+    get:
+      operationId: get-latest-script
+      parameters:
+      - description: Namespace (internal; defaults to 'default').
+        explode: false
+        in: query
+        name: namespace
+        schema:
+          description: Namespace (internal; defaults to 'default').
+          type: string
+      - in: path
+        name: name
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Script'
+          description: OK
+        default:
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ErrorModel'
+          description: Error
+      summary: Get the latest Script
+  /v0/scripts/{name}/{tag}:
+    delete:
+      operationId: delete-script
+      parameters:
+      - description: Namespace (internal; defaults to 'default').
+        explode: false
+        in: query
+        name: namespace
+        schema:
+          description: Namespace (internal; defaults to 'default').
+          type: string
+      - in: path
+        name: name
+        required: true
+        schema:
+          type: string
+      - in: path
+        name: tag
+        required: true
+        schema:
+          type: string
+      responses:
+        "204":
+          description: No Content
+        default:
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ErrorModel'
+          description: Error
+      summary: 'Delete a Script (soft-delete: sets deletionTimestamp)'
+    get:
+      operationId: get-script
+      parameters:
+      - description: Namespace (internal; defaults to 'default').
+        explode: false
+        in: query
+        name: namespace
+        schema:
+          description: Namespace (internal; defaults to 'default').
+          type: string
+      - in: path
+        name: name
+        required: true
+        schema:
+          type: string
+      - in: path
+        name: tag
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Script'
+          description: OK
+        default:
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ErrorModel'
+          description: Error
+      summary: Get a Script by name and tag
+  /v0/scripts/{name}/tags:
+    get:
+      operationId: list-tags-script
+      parameters:
+      - description: Namespace (internal; defaults to 'default').
+        explode: false
+        in: query
+        name: namespace
+        schema:
+          description: Namespace (internal; defaults to 'default').
+          type: string
+      - in: path
+        name: name
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListOutputScriptBody'
+          description: OK
+        default:
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ErrorModel'
+          description: Error
+      summary: List all tags of a Script
   /v0/skills:
     get:
       operationId: list-skills

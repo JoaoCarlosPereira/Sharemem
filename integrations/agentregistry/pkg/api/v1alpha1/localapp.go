@@ -2,13 +2,29 @@ package v1alpha1
 
 type LocalApp struct {
 	TypeMeta `json:",inline" yaml:",inline"`
-	Metadata ObjectMeta   `json:"metadata" yaml:"metadata"`
-	Spec     LocalAppSpec `json:"spec" yaml:"spec"`
-	Status   Status       `json:"status,omitzero" yaml:"status,omitempty"`
+	Metadata ObjectMeta     `json:"metadata" yaml:"metadata"`
+	Spec     LocalAppSpec   `json:"spec" yaml:"spec"`
+	Status   LocalAppStatus `json:"status,omitzero" yaml:"status,omitempty"`
 }
 
 func init() {
 	MustRegisterKind[*LocalApp, LocalAppSpec](KindLocalApp)
+}
+
+type LocalAppStatus struct {
+	Status `json:",inline" yaml:",inline"`
+
+	ResolvedSource *LocalAppResolvedSource `json:"resolvedSource,omitempty" yaml:"resolvedSource,omitempty"`
+}
+
+type LocalAppResolvedSource struct {
+	Artifact *LocalAppResolvedArtifact `json:"artifact,omitempty" yaml:"artifact,omitempty"`
+}
+
+type LocalAppResolvedArtifact struct {
+	Digest    string `json:"digest,omitempty" yaml:"digest,omitempty"`
+	MediaType string `json:"mediaType,omitempty" yaml:"mediaType,omitempty"`
+	Size      int64  `json:"size,omitempty" yaml:"size,omitempty"`
 }
 
 type LocalAppSpec struct {

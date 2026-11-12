@@ -150,47 +150,13 @@ func App(ctx context.Context, opts ...types.AppOptions) error {
 	if pool != nil {
 		sch := pkgdb.OSSSchemaRegistry().MustGet(pkgdb.OSSSourceName)
 		hookArtifactStore := internaldb.NewPostgresHookArtifactStore(pool, sch)
-		hookArtifacts = internaldb.NewSkillArtifactTransportStore(hookArtifactStore, func(ctx context.Context, ref artifact.SkillRef) error {
-			store := stores[v1alpha1.KindHook]
-			if store == nil {
-				return nil
-			}
-			if _, err := store.Get(ctx, ref.Namespace, ref.Name, ref.Tag); err != nil {
-				return err
-			}
-			stored, err := hookArtifactStore.Get(ctx, ref)
-			if err != nil {
-				return err
-			}
-			return store.ApplyPatch(ctx, ref.Namespace, ref.Name, ref.Tag, v1alpha1store.PatchOpts{
-				Status: func(current json.RawMessage) (json.RawMessage, error) {
-					hook := &v1alpha1.Hook{}
-					if err := hook.UnmarshalStatus(current); err != nil {
-						return nil, err
-					}
-					hook.Status.ResolvedSource = &v1alpha1.HookResolvedSource{Artifact: &v1alpha1.HookResolvedArtifact{
-						Digest: stored.Digest, MediaType: stored.MediaType, Size: stored.Size,
-					}}
-					hook.Status.SetCondition(v1alpha1.Condition{Type: "Ready", Status: v1alpha1.ConditionTrue, Reason: "ArtifactReady", Message: "hook package validated"})
-					if hook.Metadata.Generation > hook.Status.ObservedGeneration {
-						hook.Status.ObservedGeneration = hook.Metadata.Generation
-					}
-					return hook.MarshalStatus()
-				},
-			})
-		})
+		hookArtifacts = internaldb.NewSkillArtifactTransportStore(hookArtifactStore, artifactPinned(stores, v1alpha1.KindHook, hookArtifactStore, hookArtifactPinnedStatus))
 	}
 	var localAppArtifacts types.SkillArtifactStore
 	if pool != nil {
 		sch := pkgdb.OSSSchemaRegistry().MustGet(pkgdb.OSSSourceName)
-		localAppArtifacts = internaldb.NewSkillArtifactTransportStore(internaldb.NewPostgresLocalAppArtifactStore(pool, sch), func(ctx context.Context, ref artifact.SkillRef) error {
-			store := stores[v1alpha1.KindLocalApp]
-			if store == nil {
-				return nil
-			}
-			_, err := store.Get(ctx, ref.Namespace, ref.Name, ref.Tag)
-			return err
-		})
+		localAppArtifactStore := internaldb.NewPostgresLocalAppArtifactStore(pool, sch)
+		localAppArtifacts = internaldb.NewSkillArtifactTransportStore(localAppArtifactStore, artifactPinned(stores, v1alpha1.KindLocalApp, localAppArtifactStore, localAppArtifactPinnedStatus))
 	}
 	controllerConfig := deploymentControllerConfig(cfg)
 	controllerConfig.DependencyKinds = maps.Clone(options.DeploymentDependencyKinds)
@@ -319,6 +285,54 @@ func resolveExtraStoreSchema(table string, ossSchema pkgdb.Schema) (pkgdb.Schema
 		return pkgdb.MustNewSchema(s), t
 	}
 	return ossSchema, table
+}
+
+func artifactPinned(stores map[string]*v1alpha1store.Store, kind string, artifacts artifact.ArtifactStore, pin func(current json.RawMessage, stored *artifact.Artifact) (json.RawMessage, error)) func(context.Context, artifact.SkillRef) error {
+	return func(ctx context.Context, ref artifact.SkillRef) error {
+		store := stores[kind]
+		if store == nil {
+			return nil
+		}
+		if _, err := store.Get(ctx, ref.Namespace, ref.Name, ref.Tag); err != nil {
+			return err
+		}
+		stored, err := artifacts.Get(ctx, ref)
+		if err != nil {
+			return err
+		}
+		return store.ApplyPatch(ctx, ref.Namespace, ref.Name, ref.Tag, v1alpha1store.PatchOpts{
+			Status: func(current json.RawMessage) (json.RawMessage, error) {
+				return pin(current, stored)
+			},
+		})
+	}
+}
+
+func hookArtifactPinnedStatus(current json.RawMessage, stored *artifact.Artifact) (json.RawMessage, error) {
+	hook := &v1alpha1.Hook{}
+	if err := hook.UnmarshalStatus(current); err != nil {
+		return nil, err
+	}
+	hook.Status.ResolvedSource = &v1alpha1.HookResolvedSource{Artifact: &v1alpha1.HookResolvedArtifact{
+		Digest: stored.Digest, MediaType: stored.MediaType, Size: stored.Size,
+	}}
+	hook.Status.SetCondition(v1alpha1.Condition{Type: "Ready", Status: v1alpha1.ConditionTrue, Reason: "ArtifactReady", Message: "hook package validated"})
+	if hook.Metadata.Generation > hook.Status.ObservedGeneration {
+		hook.Status.ObservedGeneration = hook.Metadata.Generation
+	}
+	return hook.MarshalStatus()
+}
+
+func localAppArtifactPinnedStatus(current json.RawMessage, stored *artifact.Artifact) (json.RawMessage, error) {
+	app := &v1alpha1.LocalApp{}
+	if err := app.UnmarshalStatus(current); err != nil {
+		return nil, err
+	}
+	app.Status.ResolvedSource = &v1alpha1.LocalAppResolvedSource{Artifact: &v1alpha1.LocalAppResolvedArtifact{
+		Digest: stored.Digest, MediaType: stored.MediaType, Size: stored.Size,
+	}}
+	app.Status.SetCondition(v1alpha1.Condition{Type: "Ready", Status: v1alpha1.ConditionTrue, Reason: "ArtifactReady", Message: "local app package validated"})
+	return app.MarshalStatus()
 }
 
 func buildStores(pool *pgxpool.Pool, extraStoreTables map[string]string, mutableExtraKinds map[string]bool, auditor types.Auditor) map[string]*v1alpha1store.Store {

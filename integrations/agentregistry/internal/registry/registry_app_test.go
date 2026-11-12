@@ -15,6 +15,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/agentregistry-dev/agentregistry/internal/registry/config"
+	"github.com/agentregistry-dev/agentregistry/pkg/api/v1alpha1"
+	"github.com/agentregistry-dev/agentregistry/pkg/registry/artifact"
 	"github.com/agentregistry-dev/agentregistry/pkg/registry/auth"
 	pkgdb "github.com/agentregistry-dev/agentregistry/pkg/registry/database"
 )
@@ -202,4 +204,38 @@ func TestBuildMCPMux(t *testing.T) {
 		buildMCPMux(handler, meta).ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/", nil))
 		assert.Equal(t, catchAll, rec.Code)
 	})
+}
+
+func TestLocalAppArtifactPinnedStatusRecordsResolvedSource(t *testing.T) {
+	stored := &artifact.Artifact{Descriptor: artifact.Descriptor{
+		Digest: "abc123", MediaType: artifact.LocalAppMediaTypeTarGzip, Size: 42,
+	}}
+	previous := &v1alpha1.LocalApp{}
+	previous.Status.ObservedGeneration = 2
+	previous.Status.SetCondition(v1alpha1.Condition{Type: "Other", Status: v1alpha1.ConditionTrue, Reason: "Kept"})
+	rawPrevious, err := previous.MarshalStatus()
+	require.NoError(t, err)
+
+	for name, current := range map[string]json.RawMessage{"empty status": nil, "existing status": rawPrevious} {
+		t.Run(name, func(t *testing.T) {
+			raw, err := localAppArtifactPinnedStatus(current, stored)
+			require.NoError(t, err)
+
+			got := &v1alpha1.LocalApp{}
+			require.NoError(t, got.UnmarshalStatus(raw))
+			require.NotNil(t, got.Status.ResolvedSource)
+			require.NotNil(t, got.Status.ResolvedSource.Artifact)
+			assert.Equal(t, v1alpha1.LocalAppResolvedArtifact{
+				Digest: "abc123", MediaType: artifact.LocalAppMediaTypeTarGzip, Size: 42,
+			}, *got.Status.ResolvedSource.Artifact)
+			assert.True(t, got.Status.IsConditionTrue("Ready"))
+		})
+	}
+
+	raw, err := localAppArtifactPinnedStatus(rawPrevious, stored)
+	require.NoError(t, err)
+	got := &v1alpha1.LocalApp{}
+	require.NoError(t, got.UnmarshalStatus(raw))
+	assert.True(t, got.Status.IsConditionTrue("Other"))
+	assert.Equal(t, int64(2), got.Status.ObservedGeneration)
 }

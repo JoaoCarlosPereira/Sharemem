@@ -732,7 +732,7 @@ def wait_for_agentregistry(dc, timeout=120, interval=2):
 
 
 def wait_for_store_kinds(
-    dc, kinds=("skills", "hooks"), timeout=60, interval=2, access_token="local"
+    dc, kinds=("skills", "hooks", "localapps"), timeout=60, interval=2, access_token="local"
 ):
     """Confere se o Agent Registry já serve cada coleção da Store.
 

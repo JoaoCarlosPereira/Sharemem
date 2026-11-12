@@ -314,3 +314,13 @@ class TestStoreKindsAfterUpdate:
         probed = [str(arg) for call in dc.calls for arg in call if str(arg).startswith("http")]
         assert any("/v0/hooks?" in url for url in probed)
         assert any("/v0/skills?" in url for url in probed)
+
+    def test_localapps_fazem_parte_do_check_padrao(self):
+        dc = self._dc(failures=())
+        install.wait_for_store_kinds(dc, timeout=1)
+        probed = [str(arg) for call in dc.calls for arg in call if str(arg).startswith("http")]
+        assert any("/v0/localapps?" in url for url in probed)
+
+    def test_registry_sem_localapps_avisa(self):
+        dc = self._dc(failures=("localapps",))
+        assert install.wait_for_store_kinds(dc, timeout=1, interval=0) is False

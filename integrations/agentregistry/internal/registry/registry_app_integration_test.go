@@ -3,6 +3,9 @@
 package registry
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -11,8 +14,11 @@ import (
 	"github.com/danielgtaylor/huma/v2/humatest"
 	"github.com/stretchr/testify/require"
 
+	internaldb "github.com/agentregistry-dev/agentregistry/internal/registry/database"
 	arv0 "github.com/agentregistry-dev/agentregistry/pkg/api/v0"
 	"github.com/agentregistry-dev/agentregistry/pkg/api/v1alpha1"
+	"github.com/agentregistry-dev/agentregistry/pkg/registry/artifact"
+	pkgdb "github.com/agentregistry-dev/agentregistry/pkg/registry/database"
 	"github.com/agentregistry-dev/agentregistry/pkg/registry/resource"
 	"github.com/agentregistry-dev/agentregistry/pkg/registry/v1alpha1store"
 	"github.com/agentregistry-dev/agentregistry/pkg/types"
@@ -123,4 +129,56 @@ func TestBuildStores_PropagatesAuditor(t *testing.T) {
 	stores2 := buildStores(pool, nil, nil, nil)
 	require.NotNil(t, stores2[v1alpha1.KindAgent])
 	_ = types.NoopAuditor
+}
+
+func TestLocalAppArtifactPutPinsResolvedSource(t *testing.T) {
+	pool := v1alpha1store.NewTestPool(t)
+	stores := buildStores(pool, nil, nil, nil)
+	_, err := stores[v1alpha1.KindLocalApp].Upsert(t.Context(), &v1alpha1.LocalApp{
+		TypeMeta: v1alpha1.TypeMeta{APIVersion: v1alpha1.GroupVersion, Kind: v1alpha1.KindLocalApp},
+		Metadata: v1alpha1.ObjectMeta{Namespace: v1alpha1.DefaultNamespace, Name: "horas-app", Tag: "1.0.0"},
+		Spec: v1alpha1.LocalAppSpec{
+			Description:    "Lanca as horas",
+			Usage:          "horas-app lancar",
+			Effects:        []string{"escrita-externa"},
+			Area:           "gestao",
+			Wheel:          "horas_app-1.0.0-py3-none-any.whl",
+			PythonRequires: ">=3.11",
+			Commands:       v1alpha1.LocalAppCommands{Start: "horas-app", Verify: "horas-app verificar"},
+		},
+	})
+	require.NoError(t, err)
+
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	for name, body := range map[string]string{"APP.md": "# App", "horas_app-1.0.0-py3-none-any.whl": "PK"} {
+		require.NoError(t, tw.WriteHeader(&tar.Header{Name: name, Mode: 0o644, Size: int64(len(body)), Typeflag: tar.TypeReg}))
+		_, err := tw.Write([]byte(body))
+		require.NoError(t, err)
+	}
+	require.NoError(t, tw.Close())
+	require.NoError(t, gz.Close())
+
+	sch := pkgdb.OSSSchemaRegistry().MustGet(pkgdb.OSSSourceName)
+	artifactStore := internaldb.NewPostgresLocalAppArtifactStore(pool, sch)
+	transport := internaldb.NewSkillArtifactTransportStore(artifactStore,
+		artifactPinned(stores, v1alpha1.KindLocalApp, artifactStore, localAppArtifactPinnedStatus))
+	key := types.SkillArtifactKey{Namespace: v1alpha1.DefaultNamespace, Name: "horas-app", Tag: "1.0.0"}
+	_, err = transport.Put(t.Context(), key, bytes.NewReader(buf.Bytes()), types.SkillArtifactPutOptions{Size: -1})
+	require.NoError(t, err)
+
+	row, err := stores[v1alpha1.KindLocalApp].Get(t.Context(), key.Namespace, key.Name, key.Tag)
+	require.NoError(t, err)
+	app := &v1alpha1.LocalApp{}
+	require.NoError(t, app.UnmarshalStatus(row.Status))
+	stored, err := artifactStore.Get(t.Context(), artifact.SkillRef{Namespace: key.Namespace, Name: key.Name, Tag: key.Tag})
+	require.NoError(t, err)
+	require.NotNil(t, app.Status.ResolvedSource)
+	require.NotNil(t, app.Status.ResolvedSource.Artifact)
+	require.NotEmpty(t, stored.Digest)
+	require.Equal(t, v1alpha1.LocalAppResolvedArtifact{
+		Digest: stored.Digest, MediaType: artifact.LocalAppMediaTypeTarGzip, Size: int64(buf.Len()),
+	}, *app.Status.ResolvedSource.Artifact)
+	require.True(t, app.Status.IsConditionTrue("Ready"))
 }
