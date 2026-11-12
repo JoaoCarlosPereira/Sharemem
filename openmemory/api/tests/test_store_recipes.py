@@ -265,6 +265,18 @@ async def test_name_path_traversal_is_rejected_before_registry_call():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("target", ["local", "windows", "claude-code", "host", "vscode"])
+async def test_unknown_target_lists_the_accepted_targets(target):
+    registry = FakeRegistryClient(skill_resource())
+    service = InstallRecipeService(registry_client=registry)
+
+    with pytest.raises(InstallRecipeValidationError, match="^target inválido: use claude, codex, cursor$"):
+        await service.build(kind="skill", name="team-skill", tag="v1", target=target, user_id="user-1")
+
+    assert registry.calls == []
+
+
+@pytest.mark.asyncio
 async def test_repository_subfolder_path_traversal_is_rejected():
     registry = FakeRegistryClient(skill_resource(subfolder="../outside"))
     service = InstallRecipeService(registry_client=registry)

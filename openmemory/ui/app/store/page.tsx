@@ -1202,11 +1202,10 @@ function ScriptDetailCard({ name }: { name: string }) {
 }
 
 function appSettingLocation(setting: AppSetting): string {
-  if (setting.env) return `variável de ambiente ${setting.env}`;
-  if (setting.file) {
-    return `arquivo ${setting.file}${setting.key ? ` (chave ${setting.key})` : ""}`;
-  }
-  return "-";
+  const places: string[] = [];
+  if (setting.env) places.push(`variável de ambiente ${setting.env}`);
+  if (setting.file) places.push(`arquivo ${setting.file}${setting.key ? ` (chave ${setting.key})` : ""}`);
+  return places.length ? places.join(" ou ") : "-";
 }
 
 function AppDetailCard({ name }: { name: string }) {
