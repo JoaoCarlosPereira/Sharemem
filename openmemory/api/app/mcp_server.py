@@ -1716,7 +1716,7 @@ async def retire_script(name: str, confirm_user_requested: bool = False) -> str:
     return await _run_script_catalog(lambda catalog: catalog.retire(name, _current_mcp_actor_id()))
 
 
-@mcp.tool(description="Build a host-applied install recipe for a catalog resource using ShareMem InstallRecipeService. This does not write files itself, but it starts an install workflow; only call after an explicit developer request to install and pass confirm_user_requested=true. For kind=app the recipe installs the Python app in its own venv under ~/.sharemem/apps/<name> and lists the settings the user must configure.")
+@mcp.tool(description="Build a host-applied install recipe for a catalog resource using ShareMem InstallRecipeService. This does not write files itself, but it starts an install workflow; only call after an explicit developer request to install and pass confirm_user_requested=true. target is one of claude, codex or cursor (the AI client being configured; for Claude Code use claude). For kind=app the recipe installs the Python app in its own venv under ~/.sharemem/apps/<name> and lists the settings the user must configure.")
 async def get_install_recipe(
     kind: str,
     name: str,

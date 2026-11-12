@@ -223,7 +223,7 @@ def _validate_kind(kind: str) -> str:
 
 def _validate_target(target: str) -> str:
     if target not in TARGET_DESTINATIONS:
-        raise InstallRecipeValidationError("target inválido")
+        raise InstallRecipeValidationError(f"target inválido: use {', '.join(sorted(TARGET_DESTINATIONS))}")
     return target
 
 

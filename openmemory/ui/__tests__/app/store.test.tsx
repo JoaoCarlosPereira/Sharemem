@@ -213,6 +213,8 @@ function appView(version: string, isLatest: boolean, overrides: Record<string, u
         required: true,
         secret: false,
         env: "REDMINE_URL",
+        file: ".claude/apis/redmine.env",
+        key: "REDMINE_URL",
         value: "https://redmine.exemplo.com.br",
       },
       {
@@ -329,7 +331,9 @@ describe("StorePage aplicativos", () => {
     expect(url).toHaveTextContent("Endereço do Redmine");
     expect(url).toHaveTextContent("Obrigatório: sim");
     expect(url).toHaveTextContent("Segredo: não");
-    expect(url).toHaveTextContent("Onde fica: variável de ambiente REDMINE_URL");
+    expect(url).toHaveTextContent(
+      "Onde fica: variável de ambiente REDMINE_URL ou arquivo .claude/apis/redmine.env (chave REDMINE_URL)",
+    );
     const key = within(region).getByText("REDMINE_API_KEY", { selector: "span" }).closest("li") as HTMLElement;
     expect(key).toHaveTextContent("Chave de API do Redmine");
     expect(key).toHaveTextContent("Obrigatório: sim");
