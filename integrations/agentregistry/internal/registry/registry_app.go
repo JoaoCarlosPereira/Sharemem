@@ -146,18 +146,7 @@ func App(ctx context.Context, opts ...types.AppOptions) error {
 	// upload-then-pin flow. Only the association table and the status type
 	// differ. Hooks have no controller of their own — a Hook has no source to
 	// resolve, so the upload path is the only thing that pins its status.
-	var hookArtifacts types.SkillArtifactStore
-	if pool != nil {
-		sch := pkgdb.OSSSchemaRegistry().MustGet(pkgdb.OSSSourceName)
-		hookArtifactStore := internaldb.NewPostgresHookArtifactStore(pool, sch)
-		hookArtifacts = internaldb.NewSkillArtifactTransportStore(hookArtifactStore, artifactPinned(stores, v1alpha1.KindHook, hookArtifactStore, hookArtifactPinnedStatus))
-	}
-	var localAppArtifacts types.SkillArtifactStore
-	if pool != nil {
-		sch := pkgdb.OSSSchemaRegistry().MustGet(pkgdb.OSSSourceName)
-		localAppArtifactStore := internaldb.NewPostgresLocalAppArtifactStore(pool, sch)
-		localAppArtifacts = internaldb.NewSkillArtifactTransportStore(localAppArtifactStore, artifactPinned(stores, v1alpha1.KindLocalApp, localAppArtifactStore, localAppArtifactPinnedStatus))
-	}
+	hookArtifacts, localAppArtifacts := artifactTransports(pool, stores)
 	controllerConfig := deploymentControllerConfig(cfg)
 	controllerConfig.DependencyKinds = maps.Clone(options.DeploymentDependencyKinds)
 	if _, err := controller.StartDeploymentController(ctx, pool, stores, deploymentAdapters, controllerConfig); err != nil {
@@ -285,6 +274,18 @@ func resolveExtraStoreSchema(table string, ossSchema pkgdb.Schema) (pkgdb.Schema
 		return pkgdb.MustNewSchema(s), t
 	}
 	return ossSchema, table
+}
+
+func artifactTransports(pool *pgxpool.Pool, stores map[string]*v1alpha1store.Store) (hook, localApp types.SkillArtifactStore) {
+	if pool == nil {
+		return nil, nil
+	}
+	sch := pkgdb.OSSSchemaRegistry().MustGet(pkgdb.OSSSourceName)
+	hookArtifactStore := internaldb.NewPostgresHookArtifactStore(pool, sch)
+	hook = internaldb.NewSkillArtifactTransportStore(hookArtifactStore, artifactPinned(stores, v1alpha1.KindHook, hookArtifactStore, hookArtifactPinnedStatus))
+	localAppArtifactStore := internaldb.NewPostgresLocalAppArtifactStore(pool, sch)
+	localApp = internaldb.NewSkillArtifactTransportStore(localAppArtifactStore, artifactPinned(stores, v1alpha1.KindLocalApp, localAppArtifactStore, localAppArtifactPinnedStatus))
+	return hook, localApp
 }
 
 func artifactPinned(stores map[string]*v1alpha1store.Store, kind string, artifacts artifact.ArtifactStore, pin func(current json.RawMessage, stored *artifact.Artifact) (json.RawMessage, error)) func(context.Context, artifact.SkillRef) error {

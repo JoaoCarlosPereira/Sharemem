@@ -6,6 +6,8 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -162,8 +164,8 @@ func TestLocalAppArtifactPutPinsResolvedSource(t *testing.T) {
 
 	sch := pkgdb.OSSSchemaRegistry().MustGet(pkgdb.OSSSourceName)
 	artifactStore := internaldb.NewPostgresLocalAppArtifactStore(pool, sch)
-	transport := internaldb.NewSkillArtifactTransportStore(artifactStore,
-		artifactPinned(stores, v1alpha1.KindLocalApp, artifactStore, localAppArtifactPinnedStatus))
+	_, transport := artifactTransports(pool, stores)
+	require.NotNil(t, transport)
 	key := types.SkillArtifactKey{Namespace: v1alpha1.DefaultNamespace, Name: "horas-app", Tag: "1.0.0"}
 	_, err = transport.Put(t.Context(), key, bytes.NewReader(buf.Bytes()), types.SkillArtifactPutOptions{Size: -1})
 	require.NoError(t, err)
@@ -176,7 +178,8 @@ func TestLocalAppArtifactPutPinsResolvedSource(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, app.Status.ResolvedSource)
 	require.NotNil(t, app.Status.ResolvedSource.Artifact)
-	require.NotEmpty(t, stored.Digest)
+	sum := sha256.Sum256(buf.Bytes())
+	require.Equal(t, hex.EncodeToString(sum[:]), stored.Digest)
 	require.Equal(t, v1alpha1.LocalAppResolvedArtifact{
 		Digest: stored.Digest, MediaType: artifact.LocalAppMediaTypeTarGzip, Size: int64(buf.Len()),
 	}, *app.Status.ResolvedSource.Artifact)
