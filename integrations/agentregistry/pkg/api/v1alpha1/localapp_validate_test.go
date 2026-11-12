@@ -201,6 +201,9 @@ func TestLocalApp_AccessorsRoundTripThroughObject(t *testing.T) {
 
 	source.Status.ObservedGeneration = 3
 	source.Status.SetCondition(Condition{Type: "Ready", Status: ConditionTrue, Reason: "Resolved"})
+	source.Status.ResolvedSource = &LocalAppResolvedSource{Artifact: &LocalAppResolvedArtifact{
+		Digest: "sha256:abc", MediaType: "application/vnd.agentregistry.localapp.v1.tar+gzip", Size: 42,
+	}}
 	rawStatus, err := source.MarshalStatus()
 	if err != nil {
 		t.Fatalf("MarshalStatus: %v", err)
@@ -211,6 +214,18 @@ func TestLocalApp_AccessorsRoundTripThroughObject(t *testing.T) {
 	status := obj.(*LocalApp).Status
 	if status.ObservedGeneration != 3 || !status.IsConditionTrue("Ready") {
 		t.Fatalf("status = %+v, want observedGeneration 3 and Ready condition", status)
+	}
+	if status.ResolvedSource == nil || status.ResolvedSource.Artifact == nil || *status.ResolvedSource.Artifact != *source.Status.ResolvedSource.Artifact {
+		t.Fatalf("resolvedSource = %+v, want %+v", status.ResolvedSource, source.Status.ResolvedSource)
+	}
+
+	var empty LocalApp
+	rawEmpty, err := empty.MarshalStatus()
+	if err != nil {
+		t.Fatalf("MarshalStatus empty: %v", err)
+	}
+	if strings.Contains(string(rawEmpty), "resolvedSource") {
+		t.Fatalf("status without pin must omit resolvedSource, got %s", rawEmpty)
 	}
 }
 

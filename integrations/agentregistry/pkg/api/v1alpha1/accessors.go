@@ -316,9 +316,38 @@ func (a *LocalApp) MarshalSpec() (json.RawMessage, error) { return json.Marshal(
 func (a *LocalApp) UnmarshalSpec(data json.RawMessage) error {
 	return json.Unmarshal(data, &a.Spec)
 }
-func (a *LocalApp) MarshalStatus() (json.RawMessage, error) { return MarshalStatusForStorage(a.Status) }
+func (a *LocalApp) MarshalStatus() (json.RawMessage, error) {
+	base, err := MarshalStatusForStorage(a.Status.Status)
+	if err != nil {
+		return nil, err
+	}
+	m := map[string]json.RawMessage{}
+	if err := json.Unmarshal(base, &m); err != nil {
+		return nil, err
+	}
+	if a.Status.ResolvedSource != nil {
+		if m["resolvedSource"], err = json.Marshal(a.Status.ResolvedSource); err != nil {
+			return nil, err
+		}
+	}
+	return json.Marshal(m)
+}
 func (a *LocalApp) UnmarshalStatus(data json.RawMessage) error {
-	return UnmarshalStatusFromStorage(data, &a.Status)
+	if len(data) == 0 {
+		a.Status = LocalAppStatus{}
+		return nil
+	}
+	if err := UnmarshalStatusFromStorage(data, &a.Status.Status); err != nil {
+		return err
+	}
+	var custom struct {
+		ResolvedSource *LocalAppResolvedSource `json:"resolvedSource"`
+	}
+	if err := json.Unmarshal(data, &custom); err != nil {
+		return err
+	}
+	a.Status.ResolvedSource = custom.ResolvedSource
+	return nil
 }
 
 func (r *Runtime) GetMetadata() *ObjectMeta { return &r.Metadata }

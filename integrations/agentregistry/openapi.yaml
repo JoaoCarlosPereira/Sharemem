@@ -699,7 +699,7 @@ components:
         spec:
           $ref: '#/components/schemas/LocalAppSpec'
         status:
-          $ref: '#/components/schemas/Status'
+          $ref: '#/components/schemas/LocalAppStatus'
       required:
       - metadata
       - spec
@@ -716,6 +716,23 @@ components:
       required:
       - start
       - verify
+      type: object
+    LocalAppResolvedArtifact:
+      additionalProperties: false
+      properties:
+        digest:
+          type: string
+        mediaType:
+          type: string
+        size:
+          format: int64
+          type: integer
+      type: object
+    LocalAppResolvedSource:
+      additionalProperties: false
+      properties:
+        artifact:
+          $ref: '#/components/schemas/LocalAppResolvedArtifact'
       type: object
     LocalAppSetting:
       additionalProperties: false
@@ -786,6 +803,19 @@ components:
       - wheel
       - pythonRequires
       - commands
+      type: object
+    LocalAppStatus:
+      additionalProperties: false
+      properties:
+        conditions:
+          items:
+            $ref: '#/components/schemas/Condition'
+          type:
+          - array
+          - "null"
+        details: {}
+        resolvedSource:
+          $ref: '#/components/schemas/LocalAppResolvedSource'
       type: object
     MCPArgument:
       additionalProperties: false
