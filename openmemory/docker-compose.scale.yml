@@ -432,9 +432,12 @@ services:
     image: mem0/planka:local
     restart: unless-stopped
     environment:
-      # BASE_URL do app PLANKA precisa ser URL absoluta (new URL() no custom.js).
+      # BASE_URL do SPA PLANKA: URL absoluta pública same-origin com a UI
+      # (ex.: http://IP:3000/planka). NÃO use :8765 aqui — o client Socket.IO
+      # e assets devem ir pelo proxy Next /planka, não cross-origin no Traefik.
       # O embed da UI usa PLANKA_PUBLIC_URL (caminho relative /planka) via API.
-      BASE_URL: ${PLANKA_BASE_URL:-${NEXTAUTH_URL:-https://memorias.sysmo.com.br}/planka}
+      # PLANKA_INTERNAL_URL (http://planka:1337) é só server-side (MCP/UI proxy).
+      BASE_URL: ${PLANKA_BASE_URL:-${NEXTAUTH_URL:-http://localhost:3000}/planka}
       # Postgres direto (migrações Knex); schema isolado via MEM0_PG_SCHEMA + search_path.
       DATABASE_URL: postgres://${POSTGRES_USER:-mem0}:${POSTGRES_PASSWORD:-mem0}@postgres:5432/${POSTGRES_DB:-openmemory}?sslmode=disable
       MEM0_PG_SCHEMA: planka
@@ -444,9 +447,9 @@ services:
       INTERNAL_ACCESS_TOKEN: ${PLANKA_INTERNAL_ACCESS_TOKEN:-${INTERNAL_ACCESS_TOKEN:-}}
       OPENMEMORY_INTERNAL_URL: ${OPENMEMORY_INTERNAL_URL:-http://openmemory-mcp:8765}
       OPENMEMORY_BRIDGE_TOKEN: ${PLANKA_INTERNAL_ACCESS_TOKEN:-${INTERNAL_ACCESS_TOKEN:-}}
-      # Socket.IO is reached directly through Traefik from the UI origin.
-      # Allow the browser origins used by direct LAN and HTTPS access.
-      SOCKET_ALLOWED_ORIGINS: ${SOCKET_ALLOWED_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000,http://192.168.2.184:3000,https://${UI_HOSTNAME:-memorias.sysmo.com.br}}
+      # Socket.IO polling vai same-origin via UI (:3000/planka). Lista usada se
+      # alguém ainda apontar o handshake para Traefik (:8765). Inclua NEXTAUTH_URL.
+      SOCKET_ALLOWED_ORIGINS: ${SOCKET_ALLOWED_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000,${NEXTAUTH_URL:-http://localhost:3000},https://${UI_HOSTNAME:-memorias.sysmo.com.br}}
       TRUST_PROXY: "true"
       DEFAULT_ADMIN_EMAIL: ${PLANKA_DEFAULT_ADMIN_EMAIL:-admin@mem0.local}
       DEFAULT_ADMIN_PASSWORD: ${PLANKA_DEFAULT_ADMIN_PASSWORD:-${PLANKA_INTERNAL_ACCESS_TOKEN:-mem0-planka-admin}}

@@ -140,4 +140,10 @@ start_outgoing_proxy_if_needed
 export NODE_ENV=production
 
 node db/init.js
+# Mem0: ensure-schema runs before migrate in start-mem0.sh (schema only). After
+# Knex creates tables + next_id(), re-run to qualify next_id_seq and mirror
+# public views — otherwise JWT embed upsert fails with next_id_seq missing.
+if [[ -f ./mem0/ensure-schema.js ]]; then
+  node ./mem0/ensure-schema.js
+fi
 exec node app.js --prod

@@ -204,6 +204,20 @@ class TestLegacyAndTeamCompat:
         assert resp.status_code == 200
         assert resp.json()["method"] == "internal"
 
+    def test_bearer_local_stays_legacy_when_internal_token_collides(
+        self, db, monkeypatch
+    ):
+        """PLANKA_INTERNAL_ACCESS_TOKEN=local must not steal the UI legacy shim."""
+        monkeypatch.setenv("PLANKA_INTERNAL_ACCESS_TOKEN", "local")
+        monkeypatch.delenv("INTERNAL_ACCESS_TOKEN", raising=False)
+        with TestClient(_build_app("warn")) as client:
+            resp = client.get(
+                "/whoami",
+                headers={"authorization": "Bearer local"},
+            )
+        assert resp.status_code == 200
+        assert resp.json()["method"] == "legacy"
+
     def test_internal_access_token_alias_accepted(self, db, monkeypatch):
         """Fallback INTERNAL_ACCESS_TOKEN also resolves as method=internal."""
         monkeypatch.delenv("PLANKA_INTERNAL_ACCESS_TOKEN", raising=False)

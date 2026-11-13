@@ -10,19 +10,16 @@ import Config from '../constants/Config';
 
 const io = sailsIOClient(socketIOClient);
 
-function socketOrigin() {
-  const { hostname, origin, port, protocol } = window.location;
-  if (port !== '3000') {
-    return origin;
-  }
-
-  const socketProtocol = protocol === 'https:' ? 'https:' : 'http:';
-  const socketPort = protocol === 'https:' ? '8443' : '8765';
-  return `${socketProtocol}//${hostname}:${socketPort}`;
-}
-
-io.sails.url = socketOrigin();
-io.sails.path = `${Config.BASE_PATH}/socket.io/`;
+// Same-origin always: UI proxies /planka → sidecar (incl. Socket.IO polling).
+// Do NOT retarget :8765/:8443 when the embed is on :3000 — that breaks CORS
+// (browser origin :3000 → Traefik :8765) and bypasses the Next /planka proxy.
+//
+// Path SEM barra final: Next (trailingSlash=false) responde 308 em
+// `/planka/socket.io/` → `/planka/socket.io`, o que quebra long-polling POSTs
+// do Engine.IO de forma intermitente. O Route Handler já normaliza para
+// `/socket.io/` no upstream Planka.
+io.sails.url = window.location.origin;
+io.sails.path = `${Config.BASE_PATH}/socket.io`;
 io.sails.query = 'nosession=1';
 io.sails.transports = ['polling'];
 io.sails.autoConnect = false;

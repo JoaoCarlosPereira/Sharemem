@@ -90,6 +90,7 @@ export function KanbanEmbedCanvas({ boardId: propBoardId, reloadToken = 0 }: Pro
   /** Quadro pelo qual o iframe foi montado (só muda em hard load). */
   const [mountBoardId, setMountBoardId] = useState<string | undefined>(bootBoardId);
   const iframeSrcRef = useRef<string | null>(null);
+  const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const mountBoardRef = useRef<string | undefined>(bootBoardId);
   const didInitialLoad = useRef(false);
 
@@ -222,8 +223,22 @@ export function KanbanEmbedCanvas({ boardId: propBoardId, reloadToken = 0 }: Pro
     return () => window.removeEventListener("message", onMessage);
   }, [activeBoardId, apiSessionReady, hardLoad]);
 
-  // Foco/aba: só corrige a URL do shell. Nunca recarrega o iframe.
+  // Foco/aba: alinha URL do shell e pede resync leve ao iframe (fetchCore),
+  // sem remount — cobre moves de agentes cujo cardUpdate se perdeu no polling.
   useEffect(() => {
+    const askIframeResync = () => {
+      const frame = iframeRef.current;
+      if (!frame?.contentWindow) return;
+      try {
+        frame.contentWindow.postMessage(
+          { source: "mem0-kanban-shell", type: "resync" },
+          window.location.origin,
+        );
+      } catch {
+        // sandboxed / not ready
+      }
+    };
+
     const onFocus = () => {
       if (document.visibilityState === "hidden") return;
       const wanted =
@@ -235,10 +250,20 @@ export function KanbanEmbedCanvas({ boardId: propBoardId, reloadToken = 0 }: Pro
         setActiveBoardId(wanted);
         writeLastBoard(wanted);
       }
+      askIframeResync();
     };
+
+    // Polling via Next Route Handler não é push; resync periódico enquanto
+    // a aba está visível evita board stale após muitos moves de agentes.
+    const intervalId = window.setInterval(() => {
+      if (document.visibilityState === "hidden") return;
+      askIframeResync();
+    }, 20_000);
+
     document.addEventListener("visibilitychange", onFocus);
     window.addEventListener("focus", onFocus);
     return () => {
+      window.clearInterval(intervalId);
       document.removeEventListener("visibilitychange", onFocus);
       window.removeEventListener("focus", onFocus);
     };
@@ -283,6 +308,7 @@ export function KanbanEmbedCanvas({ boardId: propBoardId, reloadToken = 0 }: Pro
   // key estável após o primeiro load — soft-nav / foco não remonta.
   return (
     <iframe
+      ref={iframeRef}
       title="Kanban"
       src={iframeSrc}
       className="min-h-0 w-full flex-1 border-0 bg-background"

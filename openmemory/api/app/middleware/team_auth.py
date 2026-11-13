@@ -272,12 +272,20 @@ class AuthMiddleware:
             # Sem isto, POST /api/v1/specs/planka/card-moved recebe 401 em AUTH_MODE
             # enforce/warn (Bearer presente mas não-team), e o DnD humano reverte
             # com E_FORBIDDEN.
+            # Nunca trate o shim documentado ``Bearer local`` como bridge: se
+            # ``PLANKA_INTERNAL_ACCESS_TOKEN=local``, a UI LAN (AuthBridge) seria
+            # classificada como method=internal e o kanban-home falharia com
+            # ``Usuário sem grupo associado``.
             internal = (
                 os.getenv("PLANKA_INTERNAL_ACCESS_TOKEN")
                 or os.getenv("INTERNAL_ACCESS_TOKEN")
                 or ""
             ).strip()
-            if internal and hmac.compare_digest(header_token, internal):
+            if (
+                internal
+                and header_token != LEGACY_MCP_BEARER
+                and hmac.compare_digest(header_token, internal)
+            ):
                 AUTH_OK_TOTAL.labels(method="internal").inc()
                 ctx = AuthContext(method="internal", team="planka-bridge")
                 await self._call_with_context(scope, receive, send, ctx)

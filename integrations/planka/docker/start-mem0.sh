@@ -11,6 +11,8 @@ if [[ -z "${DATABASE_URL:-}" ]]; then
 fi
 
 # Ensure schema exists (idempotent; safe on existing Postgres volumes).
+# Note: tables/next_id() are created later by Knex in start.sh; that script
+# re-runs ensure-schema after migrate to qualify next_id_seq + public views.
 node ./mem0/ensure-schema.js
 
 # Inject search_path for node-pg / sails-postgresql when not already present.

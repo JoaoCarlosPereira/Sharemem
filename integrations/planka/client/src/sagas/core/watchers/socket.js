@@ -21,6 +21,17 @@ const createSocketEventsChannel = () =>
       emit(entryActions.handleSocketReconnect());
     };
 
+    // Shell Next.js (KanbanEmbedCanvas) pede resync quando o realtime
+    // (polling via proxy) perdeu cardUpdate de moves feitos por agentes.
+    const handleMem0ParentMessage = (event) => {
+      if (typeof window === 'undefined') return;
+      if (event.origin !== window.location.origin) return;
+      const data = event.data;
+      if (!data || data.source !== 'mem0-kanban-shell') return;
+      if (data.type !== 'resync') return;
+      emit(entryActions.handleSocketReconnect());
+    };
+
     const handleLogout = () => {
       emit(entryActions.logout(false));
     };
@@ -389,7 +400,15 @@ const createSocketEventsChannel = () =>
     socket.on('notificationServiceUpdate', handleNotificationServiceUpdate);
     socket.on('notificationServiceDelete', handleNotificationServiceDelete);
 
+    if (typeof window !== 'undefined') {
+      window.addEventListener('message', handleMem0ParentMessage);
+    }
+
     return () => {
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('message', handleMem0ParentMessage);
+      }
+
       socket.off('disconnect', handleDisconnect);
       socket.off('reconnect', handleReconnect);
 

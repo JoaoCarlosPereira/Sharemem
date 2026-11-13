@@ -75,7 +75,11 @@ export function* handleSocketReconnect() {
       notifications,
       notificationServices,
     } = yield call(requests.fetchCore));
-  } catch {
+  } catch (error) {
+    // Embed via polling proxy: falha silenciosa deixava o board stale após
+    // moves de agentes. Log ajuda a diagnosticar; o shell também pede resync.
+    // eslint-disable-next-line no-console
+    console.warn('[planka] socket reconnect refetch failed', error);
     return;
   }
 
